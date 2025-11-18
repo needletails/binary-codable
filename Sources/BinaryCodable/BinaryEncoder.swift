@@ -14,6 +14,9 @@
 import Foundation
 
 public struct BinaryEncoder {
+
+    public init() {}
+    
     public func encode(_ value: Data) throws -> Data {
         let storage = EncoderStorage()
         storage.write(value)

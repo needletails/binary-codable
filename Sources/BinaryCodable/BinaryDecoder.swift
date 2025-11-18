@@ -15,6 +15,9 @@ import Foundation
 
 // Public entry point
 public struct BinaryDecoder: Sendable {
+
+    public init() {}
+    
     public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         // Special case for Data: just read it using our raw format
         if type == Data.self {
