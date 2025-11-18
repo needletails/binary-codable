@@ -106,7 +106,7 @@ struct BinaryCodableTests {
     
     @Test("Binary Encoder/Decoder Array Test")
     func testBinaryArrayEncodingDecoding() async throws {
-     
+        
         let someMessages = ["Some Message", "More Message", "Yet Another Message"]
         let encoded = try BinaryEncoder().encode(someMessages)
         let decoded = try BinaryDecoder().decode([String].self, from: encoded)
@@ -492,5 +492,81 @@ struct BinaryCodableTests {
         let encodedStrings = try BinaryEncoder().encode(optionalStrings)
         let decodedStrings = try BinaryDecoder().decode([String?].self, from: encodedStrings)
         #expect(decodedStrings == optionalStrings)
+    }
+    
+    enum TestEnum: Codable, Equatable {
+        case one,two, three
+    }
+    
+    @Test("Binary Encoder/Decoder Enum Test")
+    func testEnumEncodingDecoding() async throws {
+        let encoded = try BinaryEncoder().encode(TestEnum.one)
+        let decoded = try BinaryDecoder().decode(TestEnum.self, from: encoded)
+        #expect(decoded == TestEnum.one)
+    }
+    
+    enum TestValueEnum: Codable, Equatable {
+        case one(String),two(Data), three(Int)
+    }
+    
+    @Test("Binary Encoder/Decoder Enum With Associated String Value Test")
+    func testEnumStringValueEncodingDecoding() async throws {
+        let encoded = try BinaryEncoder().encode(TestValueEnum.one("STRING"))
+        let decoded = try BinaryDecoder().decode(TestValueEnum.self, from: encoded)
+        #expect(decoded == TestValueEnum.one("STRING"))
+    }
+    
+    @Test("Binary Encoder/Decoder Enum With Associated Data Value Test")
+    func testEnumDataValueEncodingDecoding() async throws {
+        let encoded = try BinaryEncoder().encode(TestValueEnum.two("STRING".data(using: .utf8)!))
+        let decoded = try BinaryDecoder().decode(TestValueEnum.self, from: encoded)
+        #expect(decoded == TestValueEnum.two("STRING".data(using: .utf8)!))
+    }
+    
+    @Test("Binary Encoder/Decoder Enum With Associated Int Value Test")
+    func testEnumIntValueEncodingDecoding() async throws {
+        let encoded = try BinaryEncoder().encode(TestValueEnum.three(100))
+        let decoded = try BinaryDecoder().decode(TestValueEnum.self, from: encoded)
+        #expect(decoded == TestValueEnum.three(100))
+    }
+    
+    @Test("Binary Encoder/Decoder Date Test")
+    func testDateValueEncodingDecoding() async throws {
+        let date = Date()
+        let encoded = try BinaryEncoder().encode(date)
+        let decoded = try BinaryDecoder().decode(Date.self, from: encoded)
+        #expect(decoded == date)
+    }
+    
+    @Test("Binary Encoder/Decoder Set Test")
+    func testSetValueEncodingDecoding() async throws {
+        let set = Set([1,2,3])
+        let encoded = try BinaryEncoder().encode(set)
+        let decoded = try BinaryDecoder().decode(Set<Int>.self, from: encoded)
+        #expect(decoded == set)
+    }
+    
+    @Test("Binary Encoder/Decoder Dictionary Test")
+    func testDictIntValueEncodingDecoding() async throws {
+        let dict = ["One": "1", "Two": "2", "3": "3.0"] as [String : String]
+        let encoded = try BinaryEncoder().encode(dict)
+        let decoded = try BinaryDecoder().decode([String : String].self, from: encoded)
+        #expect(decoded == dict)
+    }
+    
+    @Test("Binary Encoder/Decoder Data Dictionary Test")
+    func testDictDataValueEncodingDecoding() async throws {
+        let dict = ["One": "1".data(using: .utf8)!, "Two": "2".data(using: .utf8)!, "3": "3.0".data(using: .utf8)!] as [String : Data]
+        let encoded = try BinaryEncoder().encode(dict)
+        let decoded = try BinaryDecoder().decode([String : Data].self, from: encoded)
+        #expect(decoded == dict)
+    }
+    
+    @Test("Binary Encoder/Decoder Nested Dictionary Test")
+    func testNestedDictIntValueEncodingDecoding() async throws {
+        let dict = ["One": ["One": "1", "Two": "2", "Three": "3.0"], "Two":["One": "1", "Two": "2", "Three": "3.0"], "Three": ["One": "1", "Two": "2", "Three": "3.0"], "Four": ["One": "1", "Two": "2", "Three": "3.0"]] as [String : [String: String]]
+        let encoded = try BinaryEncoder().encode(dict)
+        let decoded = try BinaryDecoder().decode([String : [String: String]].self, from: encoded)
+        #expect(decoded == dict)
     }
 }

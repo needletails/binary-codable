@@ -14,7 +14,7 @@
 import Foundation
 
 public struct BinaryEncoder {
-
+    
     public init() {}
     
     public func encode(_ value: Data) throws -> Data {
@@ -61,6 +61,14 @@ fileprivate final class EncoderStorage: @unchecked Sendable {
         var le = count.littleEndian
         let bytes = withUnsafeBytes(of: &le) { Array($0) } // [UInt8]
         data.replaceSubrange(position ..< position + byteCount, with: bytes)
+    }
+    
+    func replaceUInt32(at position: Int, with value: UInt32) {
+        var v = value.littleEndian
+        withUnsafeBytes(of: &v) { buffer in
+            precondition(position + 4 <= data.count, "replaceUInt32 out of bounds")
+            data.replaceSubrange(position ..< position + 4, with: buffer)
+        }
     }
     
     // Low-level writers; these must match your decoder
@@ -171,6 +179,45 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
     let encoder: _BinaryEncoder
     private var storage: EncoderStorage { encoder.storage }
     
+    /// Tracks pending value-length patches for nested containers.
+    private final class Scope: @unchecked Sendable {
+        let storage: EncoderStorage
+        var pendingLengthPosition: Int?
+        
+        init(storage: EncoderStorage) {
+            self.storage = storage
+        }
+        
+        /// If there is a key whose value length we haven't patched yet,
+        /// patch it now using the current end of the buffer.
+        func finalizePendingIfNeeded() {
+            guard let lenPos = pendingLengthPosition else { return }
+            finalize(at: lenPos)
+            pendingLengthPosition = nil
+        }
+        
+        func finalize(at lengthPosition: Int) {
+            let valueStart = lengthPosition + MemoryLayout<UInt32>.size
+            let valueLength = storage.data.count - valueStart
+            precondition(valueLength >= 0, "Negative value length in keyed container")
+            storage.replaceUInt32(at: lengthPosition, with: UInt32(valueLength))
+        }
+        
+        deinit {
+            // Container is going away; if the last key's value was a nested
+            // container and there was no "next key" to trigger the patch,
+            // finalize it now.
+            finalizePendingIfNeeded()
+        }
+    }
+    
+    /// Single shared scope for this keyed container (copied structs share it).
+    private let scope: Scope
+    
+    /// Position in the global data where we stored the UInt32 keyCount placeholder.
+    private let countPosition: Int
+    private var count: UInt32 = 0
+    
     var codingPath: [CodingKey] {
         get { storage.codingPath }
         set { storage.setCodingPath(newValue) }
@@ -178,57 +225,107 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
     
     init(encoder: _BinaryEncoder) {
         self.encoder = encoder
+        self.scope = Scope(storage: encoder.storage)
+        
+        let storage = encoder.storage
+        self.countPosition = storage.data.count
+        storage.write(UInt32(0)) // placeholder, will be patched later
+    }
+    
+    // MARK: - Internal helpers
+    
+    /// Starts a new key/value entry.
+    ///  - Finalizes any *previous* pending nested value.
+    ///  - Writes the key name and bumps the key count.
+    ///  - Reserves 4 bytes for this key’s `[UInt32 valueLength]`.
+    private mutating func beginKeyValue(_ key: Key) -> Int {
+        // If the previous key's value was a nested container, patch
+        // its length now before starting a new key.
+        scope.finalizePendingIfNeeded()
+        
+        // Write the key name as String (your String format is length+utf8).
+        storage.write(key.stringValue)
+        
+        // Bump key count and patch it at the reserved position.
+        count &+= 1
+        storage.replaceUInt32(at: countPosition, with: count)
+        
+        // Reserve 4 bytes for the value length.
+        let lengthPosition = storage.data.count
+        storage.write(UInt32(0)) // placeholder
+        return lengthPosition
+    }
+    
+    /// Patches the value length for a key whose encoding is complete *now*.
+    private mutating func endKeyValue(at lengthPosition: Int) {
+        scope.finalize(at: lengthPosition)
     }
     
     // MARK: - Nil / presence
     
     mutating func encodeNil(forKey key: Key) throws {
-        storage.writePresence(false)
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(false) // presence flag only
+        endKeyValue(at: lenPos)
     }
     
-    // MARK: - Concrete types
+    // MARK: - Concrete primitives
     
     mutating func encode(_ value: Bool, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
     }
     
     mutating func encode(_ value: String, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
     }
     
     mutating func encode(_ value: Double, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
     }
     
     mutating func encode(_ value: Int, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(Int64(value))
+        endKeyValue(at: lenPos)
     }
     
     mutating func encode(_ value: Int64, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
     }
     
     mutating func encode(_ value: Data, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
     }
     
     mutating func encode(_ value: UUID, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
     }
     
     // MARK: - Generic Encodable
     
     mutating func encode<T>(_ value: T, forKey key: Key) throws where T : Encodable {
-        // 🔑 Handle leaf / primitive types here so they *don’t* go through T.encode(to:)
+        // Fast path: primitives use the specialized implementations above.
         if let data = value as? Data {
-            try encode(data, forKey: key)      // uses your concrete Data encoder (presence + length+bytes)
+            try encode(data, forKey: key)
             return
         }
         if let uuid = value as? UUID {
@@ -256,90 +353,66 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
             return
         }
         
-        // Fallback: structured types (your own structs/enums) can drive encoding.
+        // Structured / user types: presence flag + nested encoding.
+        let lenPos = beginKeyValue(key)
         storage.writePresence(true)
+        
         storage.appendCodingPath(key)
         defer { storage.removeLastCodingKey() }
+        
         try value.encode(to: encoder)
+        endKeyValue(at: lenPos)
     }
     
     // MARK: - Optionals
     
-    mutating func encodeIfPresent(_ value: Bool?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
-    mutating func encodeIfPresent(_ value: String?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
-    mutating func encodeIfPresent(_ value: Double?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
-    mutating func encodeIfPresent(_ value: Int?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
-    mutating func encodeIfPresent(_ value: Int64?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
-    mutating func encodeIfPresent(_ value: Data?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
-    mutating func encodeIfPresent(_ value: UUID?, forKey key: Key) throws {
-        guard let value else {
-            try encodeNil(forKey: key); return
-        }
-        try encode(value, forKey: key)
-    }
-    
     mutating func encodeIfPresent<T>(_ value: T?, forKey key: Key) throws where T : Encodable {
         guard let value else {
-            try encodeNil(forKey: key); return
+            try encodeNil(forKey: key)
+            return
         }
         try encode(value, forKey: key)
     }
     
     // MARK: - Nested containers
     
-    mutating func nestedContainer<NestedKey>(keyedBy type: NestedKey.Type,
-                                             forKey key: Key) -> KeyedEncodingContainer<NestedKey> where NestedKey : CodingKey {
-        // Nested containers don't write their own presence flag - it's already handled
-        // by the generic encode<T> method or the field's presence flag
+    // MARK: - Nested containers
+    
+    mutating func nestedContainer<NestedKey>(
+        keyedBy type: NestedKey.Type,
+        forKey key: Key
+    ) -> KeyedEncodingContainer<NestedKey> where NestedKey : CodingKey {
+        // This key's value is the entire nested keyed container.
+        // NO presence flag here – the nested container will handle its own field presence.
+        let lenPos = beginKeyValue(key)
+        
+        // Remember that this key's value length needs to be patched later,
+        // after the nested container has finished writing.
+        scope.pendingLengthPosition = lenPos
+        
         storage.appendCodingPath(key)
-        defer { storage.removeLastCodingKey() }
         let nested = BinaryKeyedEncodingContainer<NestedKey>(encoder: encoder)
+        storage.removeLastCodingKey()
+        
         return KeyedEncodingContainer(nested)
     }
     
     mutating func nestedUnkeyedContainer(forKey key: Key) -> any UnkeyedEncodingContainer {
-        // Nested containers don't write their own presence flag - it's already handled
-        // by the generic encode<T> method or the field's presence flag
+        // This key's value is the entire nested unkeyed container.
+        // NO presence flag here either.
+        let lenPos = beginKeyValue(key)
+        
+        scope.pendingLengthPosition = lenPos
+        
         storage.appendCodingPath(key)
-        defer { storage.removeLastCodingKey() }
-        return BinaryUnkeyedEncodingContainer(encoder: encoder)
+        let nested = BinaryUnkeyedEncodingContainer(encoder: encoder)
+        storage.removeLastCodingKey()
+        
+        return nested
     }
+    
+    
+    // MARK: - Super
     
     mutating func superEncoder() -> Encoder {
         encoder
@@ -349,6 +422,7 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
         encoder
     }
 }
+
 
 
 // MARK: - Unkeyed container

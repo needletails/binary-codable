@@ -15,7 +15,7 @@ import Foundation
 
 // Public entry point
 public struct BinaryDecoder: Sendable {
-
+    
     public init() {}
     
     public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -50,6 +50,10 @@ fileprivate final class DecoderStorage: @unchecked Sendable {
         self.offset += offset
     }
     
+    func setOffset(_ offset: Int) {
+        self.offset = offset
+    }
+    
     func setCodingPath(_ codingPath: [CodingKey]) {
         self.codingPath = codingPath
     }
@@ -82,7 +86,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
     // MARK: - Required container methods
     
     func container<Key>(keyedBy type: Key.Type) throws -> KeyedDecodingContainer<Key> where Key: CodingKey {
-        let container = BinaryKeyedDecodingContainer<Key>(decoder: self)
+        let container = try BinaryKeyedDecodingContainer<Key>(decoder: self)
         return KeyedDecodingContainer(container)
     }
     
@@ -100,120 +104,120 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let lenSize = 4 // UInt32
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset + lenSize <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Data length")
             )
         }
-
+        
         let b0 = UInt32(d[offset])
         let b1 = UInt32(d[offset + 1]) << 8
         let b2 = UInt32(d[offset + 2]) << 16
         let b3 = UInt32(d[offset + 3]) << 24
         let lengthUInt32 = b0 | b1 | b2 | b3
-
+        
         // UInt32 → Int safe conversion
         let length = Int(lengthUInt32)
-
+        
         storage.advanceOffset(lenSize)
-
+        
         guard storage.offset + length <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Data bytes")
             )
         }
-
+        
         let slice = d[storage.offset ..< storage.offset + length]
         storage.advanceOffset(length)
         return Data(slice)
     }
-
-
+    
+    
     
     func readUUID() throws -> UUID {
         let size = 16
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset + size <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading UUID")
             )
         }
-
+        
         let bytes: uuid_t = (
             d[offset + 0], d[offset + 1], d[offset + 2], d[offset + 3],
             d[offset + 4], d[offset + 5], d[offset + 6], d[offset + 7],
             d[offset + 8], d[offset + 9], d[offset + 10], d[offset + 11],
             d[offset + 12], d[offset + 13], d[offset + 14], d[offset + 15]
         )
-
+        
         storage.advanceOffset(size)
         return UUID(uuid: bytes)
     }
-
-
+    
+    
     
     func readBool() throws -> Bool {
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset < d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Bool")
             )
         }
-
+        
         let b = d[offset]
         storage.advanceOffset(1)
         return b != 0
     }
-
+    
     
     func readInt64() throws -> Int64 {
         let size = 8
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset + size <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Int64")
             )
         }
-
+        
         var bits: UInt64 = 0
         for i in 0..<size {
             bits |= UInt64(d[offset + i]) << (UInt64(i) * 8)
         }
-
+        
         storage.advanceOffset(size)
         return Int64(bitPattern: bits)
     }
-
+    
     
     func readDouble() throws -> Double {
         let size = 8
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset + size <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Double")
             )
         }
-
+        
         var bits: UInt64 = 0
         for i in 0..<size {
             bits |= UInt64(d[offset + i]) << (UInt64(i) * 8)
         }
-
+        
         storage.advanceOffset(size)
         return Double(bitPattern: bits)
     }
@@ -222,40 +226,40 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let lenSize = 4
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset + lenSize <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading String length")
             )
         }
-
+        
         let b0 = UInt32(d[offset])
         let b1 = UInt32(d[offset + 1]) << 8
         let b2 = UInt32(d[offset + 2]) << 16
         let b3 = UInt32(d[offset + 3]) << 24
         let lengthUInt32 = b0 | b1 | b2 | b3
         let length = Int(lengthUInt32)
-
+        
         storage.advanceOffset(lenSize)
-
+        
         guard storage.offset + length <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading String bytes")
             )
         }
-
+        
         let slice = d[storage.offset ..< storage.offset + length]
         storage.advanceOffset(length)
-
+        
         guard let str = String(data: slice, encoding: .utf8) else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Invalid UTF-8 string data")
             )
         }
-
+        
         return str
     }
     
@@ -263,243 +267,287 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let size = 4
         let offset = storage.offset
         let d = storage.data
-
+        
         guard offset + size <= d.count else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading UInt32")
             )
         }
-
+        
         let b0 = UInt32(d[offset])
         let b1 = UInt32(d[offset + 1]) << 8
         let b2 = UInt32(d[offset + 2]) << 16
         let b3 = UInt32(d[offset + 3]) << 24
-        let value = b0 | b1 | b2 | b3
-
         storage.advanceOffset(size)
-        return value
+        return b0 | b1 | b2 | b3
     }
-
+    
 }
 
 fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingContainerProtocol, Sendable {
-    
     typealias Key = Key
     
     let decoder: _BinaryDecoder
-    
-    // Share codingPath with the storage instead of keeping a copy.
     private var storage: DecoderStorage { decoder.storage }
+    
+    struct Entry {
+        let key: Key
+        let valueOffset: Int   // start of the presence flag for this value
+        let valueLength: Int   // length of the value payload in bytes
+    }
+    
+    private let entries: [Entry]
     
     var codingPath: [CodingKey] {
         get { storage.codingPath }
         set { storage.setCodingPath(newValue) }
     }
     
-    // We don't track keys on the wire; this is mostly for error reporting / introspection.
-    var allKeys: [Key] = []
-    
-    init(decoder: _BinaryDecoder) {
-        self.decoder = decoder
+    /// All keys present in this keyed container.
+    var allKeys: [Key] {
+        entries.map { $0.key }
     }
     
+    init(decoder: _BinaryDecoder) throws {
+        self.decoder = decoder
+        
+        // Read keyCount (UInt32)
+        let countUInt32 = try decoder.readUInt32()
+        let count = Int(countUInt32)
+        
+        var tmpEntries: [Entry] = []
+        tmpEntries.reserveCapacity(count)
+        
+        for _ in 0..<count {
+            // 1) key name (String)
+            let keyName = try decoder.readString()
+            
+            // 2) value length (UInt32)
+            let valueLengthUInt32 = try decoder.readUInt32()
+            let valueLength = Int(valueLengthUInt32)
+            
+            let valueOffset = decoder.storage.offset
+            
+            // 3) skip the value bytes so that when init returns,
+            //    the decoder offset is at the end of this container.
+            decoder.storage.advanceOffset(valueLength)
+            
+            // Convert to CodingKey if possible; unknown keys are ignored (like JSONDecoder).
+            if let codingKey = Key(stringValue: keyName) {
+                tmpEntries.append(Entry(key: codingKey,
+                                        valueOffset: valueOffset,
+                                        valueLength: valueLength))
+            }
+        }
+        
+        self.entries = tmpEntries
+    }
+    
+    // MARK: - Helpers
+    
+    private func entry(for key: Key) -> Entry? {
+        entries.first { $0.key.stringValue == key.stringValue }
+    }
+    
+    private func withValue<T>(for key: Key, _ body: () throws -> T) throws -> T {
+        guard let entry = entry(for: key) else {
+            throw DecodingError.keyNotFound(
+                key,
+                .init(codingPath: codingPath,
+                      debugDescription: "No value associated with key \(key.stringValue)")
+            )
+        }
+        
+        let savedOffset = storage.offset
+        storage.setOffset(entry.valueOffset)
+        defer { storage.setOffset(savedOffset) }
+        
+        return try body()
+    }
+    
+    // MARK: - Key presence
+    
     func contains(_ key: Key) -> Bool {
-        // Format uses presence flags, not per-key metadata.
-        true
+        entry(for: key) != nil
     }
     
     // MARK: - Data / UUID
     
     func decode(_ type: Data.Type, forKey key: Key) throws -> Data {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                Data.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected Data but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Data.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected Data but found nil")
+                )
+            }
+            return try decoder.readData()
         }
-        return try decoder.readData()
     }
     
     func decode(_ type: UUID.Type, forKey key: Key) throws -> UUID {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                UUID.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected UUID but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    UUID.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected UUID but found nil")
+                )
+            }
+            return try decoder.readUUID()
         }
-        return try decoder.readUUID()
     }
     
     func decodeIfPresent(_ type: Data.Type, forKey key: Key) throws -> Data? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return try decoder.readData()
+        guard entry(for: key) != nil else { return nil }
+        return try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else { return nil }
+            return try decoder.readData()
+        }
     }
     
     func decodeIfPresent(_ type: UUID.Type, forKey key: Key) throws -> UUID? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return try decoder.readUUID()
+        guard entry(for: key) != nil else { return nil }
+        return try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else { return nil }
+            return try decoder.readUUID()
+        }
     }
     
     // MARK: - Nil / presence
     
     func decodeNil(forKey key: Key) throws -> Bool {
-        let present = try decoder.readBool()
-        return !present
+        guard entry(for: key) != nil else { return true } // treat missing as nil
+        return try withValue(for: key) {
+            let present = try decoder.readBool()
+            return !present
+        }
     }
     
     // MARK: - Concrete primitives
     
     func decode(_ type: Bool.Type, forKey key: Key) throws -> Bool {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                Bool.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected Bool but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Bool.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected Bool but found nil")
+                )
+            }
+            return try decoder.readBool()
         }
-        return try decoder.readBool()
     }
     
     func decode(_ type: String.Type, forKey key: Key) throws -> String {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                String.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected String but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    String.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected String but found nil")
+                )
+            }
+            return try decoder.readString()
         }
-        return try decoder.readString()
     }
     
     func decode(_ type: Double.Type, forKey key: Key) throws -> Double {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                Double.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected Double but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Double.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected Double but found nil")
+                )
+            }
+            return try decoder.readDouble()
         }
-        return try decoder.readDouble()
     }
     
     func decode(_ type: Int.Type, forKey key: Key) throws -> Int {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                Int.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected Int but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Int.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected Int but found nil")
+                )
+            }
+            return Int(try decoder.readInt64())
         }
-        return Int(try decoder.readInt64())
     }
     
     func decode(_ type: Int64.Type, forKey key: Key) throws -> Int64 {
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                Int64.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected Int64 but found nil")
-            )
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Int64.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected Int64 but found nil")
+                )
+            }
+            return try decoder.readInt64()
         }
-        return try decoder.readInt64()
     }
     
     // MARK: - Generic Decodable
     
     func decode<T>(_ type: T.Type, forKey key: Key) throws -> T where T : Decodable {
-        // presence flag is always there
-        let present = try decoder.readBool()
-        guard present else {
-            throw DecodingError.valueNotFound(
-                T.self,
-                .init(codingPath: codingPath + [key],
-                      debugDescription: "Expected \(T.self) but found nil")
-            )
-        }
-
-        // Special-case same leaf types as in the encoder:
+        // Fast path for leaf types
         if type == Data.self {
-            let value = try decoder.readData()
-            return value as! T
+            return try decode(Data.self, forKey: key) as! T
         }
         if type == UUID.self {
-            let value = try decoder.readUUID()
-            return value as! T
+            return try decode(UUID.self, forKey: key) as! T
         }
         if type == String.self {
-            let value = try decoder.readString()
-            return value as! T
+            return try decode(String.self, forKey: key) as! T
         }
         if type == Bool.self {
-            let value = try decoder.readBool()
-            return value as! T
+            return try decode(Bool.self, forKey: key) as! T
         }
         if type == Int.self {
-            let value = Int(try decoder.readInt64())
-            return value as! T
+            return try decode(Int.self, forKey: key) as! T
         }
         if type == Int64.self {
-            let value = try decoder.readInt64()
-            return value as! T
+            return try decode(Int64.self, forKey: key) as! T
         }
         if type == Double.self {
-            let value = try decoder.readDouble()
-            return value as! T
+            return try decode(Double.self, forKey: key) as! T
         }
-
-        // Structured types: let them decode themselves.
-        storage.appendCodingPath(key)
-        defer { storage.removeLastKey() }
-        return try T(from: decoder)
-    }
-
-    
-    // MARK: - Optional Decodable
-    
-    func decodeIfPresent(_ type: Bool.Type, forKey key: Key) throws -> Bool? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return try decoder.readBool()
-    }
-    
-    func decodeIfPresent(_ type: String.Type, forKey key: Key) throws -> String? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return try decoder.readString()
+        
+        // Structured types: presence flag + nested Decodable.
+        return try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    T.self,
+                    .init(codingPath: codingPath + [key],
+                          debugDescription: "Expected \(T.self) but found nil")
+                )
+            }
+            storage.appendCodingPath(key)
+            defer { storage.removeLastKey() }
+            return try T(from: decoder)
+        }
     }
     
-    func decodeIfPresent(_ type: Double.Type, forKey key: Key) throws -> Double? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return try decoder.readDouble()
-    }
-    
-    func decodeIfPresent(_ type: Int.Type, forKey key: Key) throws -> Int? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return Int(try decoder.readInt64())
-    }
-    
-    func decodeIfPresent(_ type: Int64.Type, forKey key: Key) throws -> Int64? {
-        let present = try decoder.readBool()
-        guard present else { return nil }
-        return try decoder.readInt64()
-    }
-    
-    func decodeIfPresent<T>(_ type: T.Type, forKey key: Key) throws -> T? where T: Decodable {
-        // Route primitive/leaf types to their concrete overloads
+    func decodeIfPresent<T>(_ type: T.Type, forKey key: Key) throws -> T? where T : Decodable {
+        guard entry(for: key) != nil else { return nil }
+        
+        // Leaf types first
         if type == Data.self {
             return try decodeIfPresent(Data.self, forKey: key) as? T
         }
@@ -521,40 +569,37 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         if type == Double.self {
             return try decodeIfPresent(Double.self, forKey: key) as? T
         }
-
+        
         // Generic path for structured optionals
-        let present = try decoder.readBool()
-        guard present else { return nil }
-
-        storage.appendCodingPath(key)
-        defer { storage.removeLastKey() }
-        return try T(from: decoder)
+        return try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else { return nil }
+            
+            storage.appendCodingPath(key)
+            defer { storage.removeLastKey() }
+            return try T(from: decoder)
+        }
     }
-
-
     
     // MARK: - Nested containers
     
     func nestedContainer<NestedKey>(keyedBy type: NestedKey.Type,
                                     forKey key: Key) throws -> KeyedDecodingContainer<NestedKey> where NestedKey : CodingKey {
-        // Nested containers don't read their own presence flag - it's already handled
-        // by the generic decode<T> method or the field's presence flag
-        storage.appendCodingPath(key)
-        defer { storage.removeLastKey() }
-        
-        // Create a new keyed container for the nested object
-        let container = BinaryKeyedDecodingContainer<NestedKey>(decoder: decoder)
-        return KeyedDecodingContainer(container)
+        // Interpret the value for this key as a nested keyed container.
+        return try withValue(for: key) {
+            storage.appendCodingPath(key)
+            defer { storage.removeLastKey() }
+            let container = try BinaryKeyedDecodingContainer<NestedKey>(decoder: decoder)
+            return KeyedDecodingContainer(container)
+        }
     }
     
-    func nestedUnkeyedContainer(forKey key: Key) throws -> UnkeyedDecodingContainer {
-        // Nested containers don't read their own presence flag - it's already handled
-        // by the generic decode<T> method or the field's presence flag
-        storage.appendCodingPath(key)
-        defer { storage.removeLastKey() }
-        
-        // Create a new unkeyed container for the nested array
-        return BinaryUnkeyedDecodingContainer(decoder: decoder)
+    func nestedUnkeyedContainer(forKey key: Key) throws -> any UnkeyedDecodingContainer {
+        return try withValue(for: key) {
+            storage.appendCodingPath(key)
+            defer { storage.removeLastKey() }
+            return BinaryUnkeyedDecodingContainer(decoder: decoder)
+        }
     }
     
     func superDecoder() throws -> Decoder {
@@ -565,6 +610,7 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         decoder
     }
 }
+
 
 
 fileprivate struct BinarySingleValueDecodingContainer: SingleValueDecodingContainer, Sendable {
@@ -620,7 +666,7 @@ fileprivate struct BinarySingleValueDecodingContainer: SingleValueDecodingContai
     // MARK: - Generic Decodable
     
     func decode<T>(_ type: T.Type) throws -> T where T : Decodable {
-
+        
         if type == Data.self {
             return try decode(Data.self) as! T
         }
@@ -818,7 +864,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
     mutating func decode<T>(_ type: T.Type) throws -> T where T: Decodable {
         try checkNotAtEnd()
         let present = try decoder.readBool()
-
+        
         // Handle Optional<Wrapped> specifically
         if let optMeta = T.self as? _OptionalDecodingShim.Type {
             defer { currentIndex += 1 }
@@ -832,7 +878,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
                 return try optMeta._decodeWrapped(from: decoder) as! T
             }
         }
-
+        
         // Non-optional path: presence must be true
         guard present else {
             throw DecodingError.valueNotFound(
@@ -841,7 +887,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
                       debugDescription: "Expected \(T.self) but found nil")
             )
         }
-
+        
         // Special-case same leaf types
         if type == Data.self {
             let v = try decoder.readData()
@@ -878,7 +924,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
             currentIndex += 1
             return v as! T
         }
-
+        
         // Fallback: structured types
         storage.appendCodingPath(ArrayIndexKey(currentIndex))
         defer { storage.removeLastKey() }
@@ -886,7 +932,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
         currentIndex += 1
         return value
     }
-
+    
     
     // MARK: - Nested containers
     
@@ -904,7 +950,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
         storage.appendCodingPath(ArrayIndexKey(currentIndex))
         defer { storage.removeLastKey() }
         
-        let container = BinaryKeyedDecodingContainer<NestedKey>(decoder: decoder)
+        let container = try BinaryKeyedDecodingContainer<NestedKey>(decoder: decoder)
         currentIndex += 1
         return KeyedDecodingContainer(container)
     }
