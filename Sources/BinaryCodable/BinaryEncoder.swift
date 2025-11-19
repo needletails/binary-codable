@@ -17,16 +17,47 @@ public struct BinaryEncoder {
     
     public init() {}
     
+    /// Wire-format version so you can change things in the future.
+    private let version: UInt8 = 1
+    
+    /// Stable-ish type name used in the header.
+    private func typeName<T>(for type: T.Type) -> String {
+        // `String(reflecting:)` gives names like "Swift.String", "MyModule.ChannelInfo"
+        String(reflecting: type)
+    }
+    
+    // MARK: - Public API
+    
     public func encode(_ value: Data) throws -> Data {
         let storage = EncoderStorage()
-        storage.write(value)
+        
+        // 1) Version
+        storage.appendData(version)
+        
+        // 2) Type header
+        let type = typeName(for: Data.self)
+        storage.write(type)          // uses your existing `write(_ value: String)`
+        
+        // 3) Payload (your existing Data format)
+        storage.write(value)         // UInt32 length + bytes
+        
         return storage.data
     }
     
     public func encode<T: Encodable>(_ value: T) throws -> Data {
         let storage = EncoderStorage()
+        
+        // 1) Version
+        storage.appendData(version)
+        
+        // 2) Type header
+        let type = typeName(for: T.self)
+        storage.write(type)
+        
+        // 3) Payload – unchanged logic
         let core = _BinaryEncoder(storage: storage)
         try value.encode(to: core)
+        
         return storage.data
     }
 }
@@ -72,6 +103,10 @@ fileprivate final class EncoderStorage: @unchecked Sendable {
     }
     
     // Low-level writers; these must match your decoder
+    
+    func appendData(_ chunk: UInt8) {
+        data.append(chunk)
+    }
     
     func write(_ value: Bool) {
         data.append(value ? 1 : 0)
@@ -669,6 +704,42 @@ fileprivate struct BinarySingleValueEncodingContainer: SingleValueEncodingContai
         
         // For other types, let them choose their own container (usually keyed/unkeyed)
         try value.encode(to: encoder)
+    }
+    
+    mutating func encode(_ value: Int8) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: Int16) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: Int32) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: UInt) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: UInt8) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: UInt16) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: UInt32) throws {
+        storage.write(Int64(value))
+    }
+
+    mutating func encode(_ value: UInt64) throws {
+        storage.write(Int64(truncatingIfNeeded: value))
+    }
+
+    mutating func encode(_ value: Float) throws {
+        try encode(Double(value))
     }
 }
 

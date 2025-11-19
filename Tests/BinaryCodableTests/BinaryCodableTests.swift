@@ -569,4 +569,193 @@ struct BinaryCodableTests {
         let decoded = try BinaryDecoder().decode([String : [String: String]].self, from: encoded)
         #expect(decoded == dict)
     }
+    
+    @Test("Binary Encoder/Decoder Empty Data Test")
+    func testEmptyDataEncodingDecoding() async throws {
+        #expect(throws: Never.self) {
+            let encoded = try BinaryEncoder().encode(Data())
+            _ = try BinaryDecoder().decode(Data.self, from: encoded)
+        }
+    }
+    
+    // MARK: - Local helpers/types for tests
+
+    private struct Person: Codable, Equatable {
+        let name: String
+        let age: Int
+    }
+
+    private struct Animal: Codable, Equatable {
+        let species: String
+    }
+
+    private enum SimpleEnum: String, Codable {
+        case one, two, three
+    }
+
+    // MARK: - Wrong type tests
+
+    @Test("Binary Encoder/Decoder Wrong Primitive Type: Data -> String")
+    func testWrongType_DataToString() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(Data([0x01, 0x02]))
+            _ = try BinaryDecoder().decode(String.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Primitive Type: String -> Int")
+    func testWrongType_StringToInt() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode("hello")
+            _ = try BinaryDecoder().decode(Int.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Primitive Type: Int -> Bool")
+    func testWrongType_IntToBool() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(42)
+            _ = try BinaryDecoder().decode(Bool.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Primitive Type: Double -> UUID")
+    func testWrongType_DoubleToUUID() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(3.14159)
+            _ = try BinaryDecoder().decode(UUID.self, from: encoded)
+        }
+    }
+
+    // MARK: - Struct / enum mismatches
+
+    @Test("Binary Encoder/Decoder Wrong Complex Type: Person -> Animal")
+    func testWrongType_PersonToAnimal() async throws {
+        #expect(throws: Error.self) {
+            let person = Person(name: "Alice", age: 30)
+            let encoded = try BinaryEncoder().encode(person)
+            _ = try BinaryDecoder().decode(Animal.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Complex Type: Person -> SimpleEnum")
+    func testWrongType_PersonToEnum() async throws {
+        #expect(throws: Error.self) {
+            let person = Person(name: "Bob", age: 25)
+            let encoded = try BinaryEncoder().encode(person)
+            _ = try BinaryDecoder().decode(SimpleEnum.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Complex Type: Enum -> Person")
+    func testWrongType_EnumToPerson() async throws {
+        #expect(throws: Error.self) {
+            let value = SimpleEnum.two
+            let encoded = try BinaryEncoder().encode(value)
+            _ = try BinaryDecoder().decode(Person.self, from: encoded)
+        }
+    }
+
+    // MARK: - Collections vs primitives
+
+    @Test("Binary Encoder/Decoder Wrong Collection Type: [Int] -> Int")
+    func testWrongType_ArrayToInt() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode([1, 2, 3])
+            _ = try BinaryDecoder().decode(Int.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Collection Type: Set<String> -> [String]")
+    func testWrongType_SetToArray() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(Set(["a", "b", "c"]))
+            _ = try BinaryDecoder().decode([String].self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Collection Type: [String] -> Set<String>")
+    func testWrongType_ArrayToSet() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(["x", "y", "z"])
+            _ = try BinaryDecoder().decode(Set<String>.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Collection Type: [String: Int] -> [String: String]")
+    func testWrongType_DictionaryValueTypeMismatch() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(["one": 1, "two": 2])
+            _ = try BinaryDecoder().decode([String: String].self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Collection Type: [String: Int] -> [Int]")
+    func testWrongType_DictionaryToArray() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(["one": 1, "two": 2])
+            _ = try BinaryDecoder().decode([Int].self, from: encoded)
+        }
+    }
+
+    // MARK: - Optionals vs non-optionals
+
+    @Test("Binary Encoder/Decoder Wrong Optional Type: Int? -> String?")
+    func testWrongType_OptionalIntToOptionalString() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(Int?.some(123))
+            _ = try BinaryDecoder().decode(String?.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Optional Type: Int? -> Int")
+    func testWrongType_OptionalIntToNonOptionalInt() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(Int?.some(99))
+            _ = try BinaryDecoder().decode(Int.self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Optional Type: String -> String?")
+    func testWrongType_NonOptionalStringToOptionalString() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode("plain")
+            _ = try BinaryDecoder().decode(String?.self, from: encoded)
+        }
+    }
+
+    // MARK: - Nested / composite
+
+    @Test("Binary Encoder/Decoder Wrong Nested Type: [Person] -> [Animal]")
+    func testWrongType_ArrayPersonToArrayAnimal() async throws {
+        #expect(throws: Error.self) {
+            let people = [
+                Person(name: "Alice", age: 30),
+                Person(name: "Bob", age: 25)
+            ]
+            let encoded = try BinaryEncoder().encode(people)
+            _ = try BinaryDecoder().decode([Animal].self, from: encoded)
+        }
+    }
+
+    @Test("Binary Encoder/Decoder Wrong Nested Type: [String: Person] -> [String: Animal]")
+    func testWrongType_DictPersonToDictAnimal() async throws {
+        #expect(throws: Error.self) {
+            let dict = [
+                "p1": Person(name: "Alice", age: 30),
+                "p2": Person(name: "Bob", age: 25)
+            ]
+            let encoded = try BinaryEncoder().encode(dict)
+            _ = try BinaryDecoder().decode([String: Animal].self, from: encoded)
+        }
+    }
+
+    
+    @Test("Binary Encoder/Decoder Wrong Nested Generic Type Test")
+    func testEmptyDataEncodingDecodingWrongNestedGenericType() async throws {
+        #expect(throws: Error.self) {
+            let encoded = try BinaryEncoder().encode(Data())
+            _ = try BinaryDecoder().decode(NestedObject.self, from: encoded)
+        }
+    }
 }

@@ -14,22 +14,130 @@
 import Foundation
 
 // Public entry point
+//public struct BinaryDecoder: Sendable {
+//
+//    public init() {}
+//
+//    public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+//        let storage = DecoderStorage(data: data)
+//        let core = _BinaryDecoder(storage: storage)
+//
+//        // 1) Read and validate version
+//        guard storage.offset < storage.data.count else {
+//            throw DecodingError.dataCorrupted(
+//                .init(codingPath: [],
+//                      debugDescription: "Empty data; missing version byte")
+//            )
+//        }
+//
+//        let version = storage.data[storage.offset]
+//        storage.advanceOffset(1)
+//
+//        guard version == 1 else {
+//            throw DecodingError.dataCorrupted(
+//                .init(codingPath: [],
+//                      debugDescription: "Unsupported binary format version \(version)")
+//            )
+//        }
+//
+//        // 2) Read encoded type name
+//        let encodedTypeName = try core.readString()
+//        let expectedTypeName = String(reflecting: T.self)
+//
+//        guard encodedTypeName == expectedTypeName else {
+//            throw DecodingError.typeMismatch(
+//                T.self,
+//                .init(
+//                    codingPath: storage.codingPath,
+//                    debugDescription: "Type mismatch: encoded as \(encodedTypeName), requested \(expectedTypeName)"
+//                )
+//            )
+//        }
+//
+//        // 3) Decode payload using your existing logic
+//        let value: T
+//        if type == Data.self {
+//            let result = try core.readData()
+//            value = result as! T
+//        } else {
+//            value = try T(from: core)
+//        }
+//
+//        // 4) Ensure no trailing bytes remain
+//        if storage.offset != storage.data.count {
+//            throw DecodingError.dataCorrupted(
+//                .init(
+//                    codingPath: storage.codingPath,
+//                    debugDescription: "Trailing bytes after decoding \(T.self): consumed \(storage.offset) of \(storage.data.count)"
+//                )
+//            )
+//        }
+//
+//        return value
+//    }
+//}
+
 public struct BinaryDecoder: Sendable {
-    
+
     public init() {}
-    
+
     public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
-        // Special case for Data: just read it using our raw format
-        if type == Data.self {
-            let storage = DecoderStorage(data: data)
-            let core = _BinaryDecoder(storage: storage)
-            let result = try core.readData()
-            return result as! T
-        }
-        
         let storage = DecoderStorage(data: data)
         let core = _BinaryDecoder(storage: storage)
-        return try T(from: core)
+
+        // 1) Read and validate version
+        guard storage.offset < storage.data.count else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [],
+                      debugDescription: "Empty data; missing version byte")
+            )
+        }
+
+        let version = storage.data[storage.offset]
+        storage.advanceOffset(1)
+
+        guard version == 1 else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [],
+                      debugDescription: "Unsupported binary format version \(version)")
+            )
+        }
+
+        // 2) Read encoded type name and compare canonically
+        let encodedTypeNameRaw = try core.readString()
+        let encodedCanonical   = canonicalEncodedTypeName(encodedTypeNameRaw)
+        let expectedCanonical  = canonicalTypeName(T.self)
+
+        guard encodedCanonical == expectedCanonical else {
+            throw DecodingError.typeMismatch(
+                T.self,
+                .init(
+                    codingPath: storage.codingPath,
+                    debugDescription: "Type mismatch: encoded as \(encodedTypeNameRaw), requested \(String(reflecting: T.self))"
+                )
+            )
+        }
+
+        // 3) Decode payload using your existing logic
+        let value: T
+        if type == Data.self {
+            let result = try core.readData()
+            value = result as! T
+        } else {
+            value = try T(from: core)
+        }
+
+        // 4) Ensure no trailing bytes remain
+        if storage.offset != storage.data.count {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: storage.codingPath,
+                    debugDescription: "Trailing bytes after decoding \(T.self): consumed \(storage.offset) of \(storage.data.count)"
+                )
+            )
+        }
+
+        return value
     }
 }
 
@@ -1058,4 +1166,36 @@ extension Optional: _OptionalDecodingShim where Wrapped: Decodable {
         let wrapped = try Wrapped(from: decoder)
         return .some(wrapped)
     }
+}
+
+// MARK: - Optional-aware type canonicalization
+
+fileprivate protocol _OptionalMarker {
+    static var _wrappedType: Any.Type { get }
+}
+
+extension Optional: _OptionalMarker {
+    static var _wrappedType: Any.Type { Wrapped.self }
+}
+
+/// Canonical (schema) type name for a Swift type.
+/// `Optional<T>` and `T` both canonicalize to the same string.
+fileprivate func canonicalTypeName(_ type: Any.Type) -> String {
+    if let opt = type as? _OptionalMarker.Type {
+        return String(reflecting: opt._wrappedType) // inner T
+    } else {
+        return String(reflecting: type)
+    }
+}
+
+/// Canonicalize an encoded type-name string.
+/// If it's `Swift.Optional<Foo.Bar>`, we return `Foo.Bar`.
+fileprivate func canonicalEncodedTypeName(_ name: String) -> String {
+    let prefix = "Swift.Optional<"
+    let suffix = ">"
+    if name.hasPrefix(prefix), name.hasSuffix(suffix) {
+        let inner = name.dropFirst(prefix.count).dropLast(suffix.count)
+        return String(inner)
+    }
+    return name
 }
