@@ -13,78 +13,14 @@
 
 import Foundation
 
-// Public entry point
-//public struct BinaryDecoder: Sendable {
-//
-//    public init() {}
-//
-//    public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
-//        let storage = DecoderStorage(data: data)
-//        let core = _BinaryDecoder(storage: storage)
-//
-//        // 1) Read and validate version
-//        guard storage.offset < storage.data.count else {
-//            throw DecodingError.dataCorrupted(
-//                .init(codingPath: [],
-//                      debugDescription: "Empty data; missing version byte")
-//            )
-//        }
-//
-//        let version = storage.data[storage.offset]
-//        storage.advanceOffset(1)
-//
-//        guard version == 1 else {
-//            throw DecodingError.dataCorrupted(
-//                .init(codingPath: [],
-//                      debugDescription: "Unsupported binary format version \(version)")
-//            )
-//        }
-//
-//        // 2) Read encoded type name
-//        let encodedTypeName = try core.readString()
-//        let expectedTypeName = String(reflecting: T.self)
-//
-//        guard encodedTypeName == expectedTypeName else {
-//            throw DecodingError.typeMismatch(
-//                T.self,
-//                .init(
-//                    codingPath: storage.codingPath,
-//                    debugDescription: "Type mismatch: encoded as \(encodedTypeName), requested \(expectedTypeName)"
-//                )
-//            )
-//        }
-//
-//        // 3) Decode payload using your existing logic
-//        let value: T
-//        if type == Data.self {
-//            let result = try core.readData()
-//            value = result as! T
-//        } else {
-//            value = try T(from: core)
-//        }
-//
-//        // 4) Ensure no trailing bytes remain
-//        if storage.offset != storage.data.count {
-//            throw DecodingError.dataCorrupted(
-//                .init(
-//                    codingPath: storage.codingPath,
-//                    debugDescription: "Trailing bytes after decoding \(T.self): consumed \(storage.offset) of \(storage.data.count)"
-//                )
-//            )
-//        }
-//
-//        return value
-//    }
-//}
-
 public struct BinaryDecoder: Sendable {
-
+    
     public init() {}
-
+    
     public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         let storage = DecoderStorage(data: data)
         let core = _BinaryDecoder(storage: storage)
-
+        
         // 1) Read and validate version
         guard storage.offset < storage.data.count else {
             throw DecodingError.dataCorrupted(
@@ -92,22 +28,22 @@ public struct BinaryDecoder: Sendable {
                       debugDescription: "Empty data; missing version byte")
             )
         }
-
+        
         let version = storage.data[storage.offset]
         storage.advanceOffset(1)
-
+        
         guard version == 1 else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: [],
                       debugDescription: "Unsupported binary format version \(version)")
             )
         }
-
+        
         // 2) Read encoded type name and compare canonically
         let encodedTypeNameRaw = try core.readString()
         let encodedCanonical   = canonicalEncodedTypeName(encodedTypeNameRaw)
         let expectedCanonical  = canonicalTypeName(T.self)
-
+        
         guard encodedCanonical == expectedCanonical else {
             throw DecodingError.typeMismatch(
                 T.self,
@@ -117,7 +53,7 @@ public struct BinaryDecoder: Sendable {
                 )
             )
         }
-
+        
         // 3) Decode payload using your existing logic
         let value: T
         if type == Data.self {
@@ -126,7 +62,7 @@ public struct BinaryDecoder: Sendable {
         } else {
             value = try T(from: core)
         }
-
+        
         // 4) Ensure no trailing bytes remain
         if storage.offset != storage.data.count {
             throw DecodingError.dataCorrupted(
@@ -136,7 +72,7 @@ public struct BinaryDecoder: Sendable {
                 )
             )
         }
-
+        
         return value
     }
 }

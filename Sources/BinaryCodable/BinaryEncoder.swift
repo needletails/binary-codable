@@ -709,35 +709,35 @@ fileprivate struct BinarySingleValueEncodingContainer: SingleValueEncodingContai
     mutating func encode(_ value: Int8) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: Int16) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: Int32) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: UInt) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: UInt8) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: UInt16) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: UInt32) throws {
         storage.write(Int64(value))
     }
-
+    
     mutating func encode(_ value: UInt64) throws {
         storage.write(Int64(truncatingIfNeeded: value))
     }
-
+    
     mutating func encode(_ value: Float) throws {
         try encode(Double(value))
     }
