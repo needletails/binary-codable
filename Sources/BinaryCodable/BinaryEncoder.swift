@@ -13,12 +13,15 @@
 
 import Foundation
 
-public struct BinaryEncoder {
-    
-    public init() {}
+public struct BinaryEncoder: Sendable {
     
     /// Wire-format version so you can change things in the future.
-    private let version: UInt8 = 1
+    private let version: UInt8 = 2
+    
+    /// The Magic header used to reliably detect what kind of data we are looking at before trying to parse it.
+    private static let magic: UInt32 = 0x4E54424E
+    
+    public init() {}
     
     /// Stable-ish type name used in the header.
     private func typeName<T>(for type: T.Type) -> String {
@@ -34,11 +37,14 @@ public struct BinaryEncoder {
         // 1) Version
         storage.appendData(version)
         
-        // 2) Type header
+        // 2) Magic Header
+        storage.write(BinaryEncoder.magic)
+        
+        // 3) Type header
         let type = typeName(for: Data.self)
         storage.write(type)          // uses your existing `write(_ value: String)`
         
-        // 3) Payload (your existing Data format)
+        // 4) Payload (your existing Data format)
         storage.write(value)         // UInt32 length + bytes
         
         return storage.data
@@ -50,11 +56,14 @@ public struct BinaryEncoder {
         // 1) Version
         storage.appendData(version)
         
-        // 2) Type header
+        // 2) Magic Header
+        storage.write(BinaryEncoder.magic)
+        
+        // 3) Type header
         let type = typeName(for: T.self)
         storage.write(type)
         
-        // 3) Payload – unchanged logic
+        // 4) Payload – unchanged logic
         let core = _BinaryEncoder(storage: storage)
         try value.encode(to: core)
         
@@ -121,7 +130,17 @@ fileprivate final class EncoderStorage: @unchecked Sendable {
         withUnsafeBytes(of: &v) { data.append(contentsOf: $0) }
     }
     
+    func write(_ value: UInt64) {
+        var v = value.littleEndian
+        withUnsafeBytes(of: &v) { data.append(contentsOf: $0) }
+    }
+    
     func write(_ value: Double) {
+        var bits = value.bitPattern.littleEndian
+        withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
+    }
+    
+    func write(_ value: Float) {
         var bits = value.bitPattern.littleEndian
         withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
     }
@@ -327,7 +346,35 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
         endKeyValue(at: lenPos)
     }
     
+    mutating func encode(_ value: Float, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(value)  // Native Float encoding (version 2+)
+        endKeyValue(at: lenPos)
+    }
+    
     mutating func encode(_ value: Int, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: Int8, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: Int16, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: Int32, forKey key: Key) throws {
         let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(Int64(value))
@@ -338,6 +385,48 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
         let lenPos = beginKeyValue(key)
         storage.writePresence(true)
         storage.write(value)
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: UInt, forKey key: Key) throws {
+        guard value <= UInt(Int64.max) else {
+            throw EncodingError.invalidValue(
+                value,
+                .init(codingPath: codingPath + [key],
+                      debugDescription: "UInt too large for Int64 wire format: \(value)")
+            )
+        }
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: UInt8, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: UInt16, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: UInt32, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        endKeyValue(at: lenPos)
+    }
+    
+    mutating func encode(_ value: UInt64, forKey key: Key) throws {
+        let lenPos = beginKeyValue(key)
+        storage.writePresence(true)
+        storage.write(value)  // Native UInt64 encoding (version 2+)
         endKeyValue(at: lenPos)
     }
     
@@ -379,14 +468,66 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
             try encode(int, forKey: key)
             return
         }
+        if let int8 = value as? Int8 {
+            try encode(int8, forKey: key)
+            return
+        }
+        if let int16 = value as? Int16 {
+            try encode(int16, forKey: key)
+            return
+        }
+        if let int32 = value as? Int32 {
+            try encode(int32, forKey: key)
+            return
+        }
         if let int64 = value as? Int64 {
             try encode(int64, forKey: key)
+            return
+        }
+        if let uint = value as? UInt {
+            try encode(uint, forKey: key)
+            return
+        }
+        if let uint8 = value as? UInt8 {
+            try encode(uint8, forKey: key)
+            return
+        }
+        if let uint16 = value as? UInt16 {
+            try encode(uint16, forKey: key)
+            return
+        }
+        if let uint32 = value as? UInt32 {
+            try encode(uint32, forKey: key)
+            return
+        }
+        if let uint64 = value as? UInt64 {
+            try encode(uint64, forKey: key)
             return
         }
         if let double = value as? Double {
             try encode(double, forKey: key)
             return
         }
+        if let float = value as? Float {
+            try encode(float, forKey: key)
+            return
+        }
+        
+        // ✅ Special-case Optional<Wrapped> so dictionaries encode nil correctly.
+        if let optional = value as? _OptionalEncodingShim {
+            let lenPos = beginKeyValue(key)
+
+            if optional._isNil {
+                storage.writePresence(false)          // nil
+            } else {
+                storage.writePresence(true)           // some
+                try optional._encodeWrapped(to: encoder) // encode wrapped directly
+            }
+
+            endKeyValue(at: lenPos)
+            return
+        }
+
         
         // Structured / user types: presence flag + nested encoding.
         let lenPos = beginKeyValue(key)
@@ -462,7 +603,7 @@ fileprivate struct BinaryKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCo
 
 // MARK: - Unkeyed container
 
-fileprivate struct BinaryUnkeyedEncodingContainer: UnkeyedEncodingContainer {
+fileprivate struct BinaryUnkeyedEncodingContainer: UnkeyedEncodingContainer, Sendable {
     let encoder: _BinaryEncoder
     
     private var storage: EncoderStorage { encoder.storage }
@@ -522,7 +663,31 @@ fileprivate struct BinaryUnkeyedEncodingContainer: UnkeyedEncodingContainer {
         bumpCount()
     }
     
+    mutating func encode(_ value: Float) throws {
+        storage.writePresence(true)
+        storage.write(value)  // Native Float encoding (version 2+)
+        bumpCount()
+    }
+    
     mutating func encode(_ value: Int) throws {
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: Int8) throws {
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: Int16) throws {
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: Int32) throws {
         storage.writePresence(true)
         storage.write(Int64(value))
         bumpCount()
@@ -531,6 +696,43 @@ fileprivate struct BinaryUnkeyedEncodingContainer: UnkeyedEncodingContainer {
     mutating func encode(_ value: Int64) throws {
         storage.writePresence(true)
         storage.write(value)
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: UInt) throws {
+        guard value <= UInt(Int64.max) else {
+            throw EncodingError.invalidValue(
+                value,
+                .init(codingPath: codingPath,
+                      debugDescription: "UInt too large for Int64 wire format: \(value)")
+            )
+        }
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: UInt8) throws {
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: UInt16) throws {
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: UInt32) throws {
+        storage.writePresence(true)
+        storage.write(Int64(value))
+        bumpCount()
+    }
+    
+    mutating func encode(_ value: UInt64) throws {
+        storage.writePresence(true)
+        storage.write(value)  // Native UInt64 encoding (version 2+)
         bumpCount()
     }
     
@@ -581,12 +783,48 @@ fileprivate struct BinaryUnkeyedEncodingContainer: UnkeyedEncodingContainer {
             try encode(int)
             return
         }
+        if let int8 = value as? Int8 {
+            try encode(int8)
+            return
+        }
+        if let int16 = value as? Int16 {
+            try encode(int16)
+            return
+        }
+        if let int32 = value as? Int32 {
+            try encode(int32)
+            return
+        }
         if let int64 = value as? Int64 {
             try encode(int64)
             return
         }
+        if let uint = value as? UInt {
+            try encode(uint)
+            return
+        }
+        if let uint8 = value as? UInt8 {
+            try encode(uint8)
+            return
+        }
+        if let uint16 = value as? UInt16 {
+            try encode(uint16)
+            return
+        }
+        if let uint32 = value as? UInt32 {
+            try encode(uint32)
+            return
+        }
+        if let uint64 = value as? UInt64 {
+            try encode(uint64)
+            return
+        }
         if let double = value as? Double {
             try encode(double)
+            return
+        }
+        if let float = value as? Float {
+            try encode(float)
             return
         }
         
@@ -693,12 +931,48 @@ fileprivate struct BinarySingleValueEncodingContainer: SingleValueEncodingContai
             try encode(int)
             return
         }
+        if let int = value as? Int8 {
+            try encode(int)
+            return
+        }
+        if let int = value as? Int16 {
+            try encode(int)
+            return
+        }
+        if let int = value as? Int32 {
+            try encode(int)
+            return
+        }
         if let int64 = value as? Int64 {
             try encode(int64)
             return
         }
+        if let int = value as? UInt {
+            try encode(int)
+            return
+        }
+        if let int = value as? UInt8 {
+            try encode(int)
+            return
+        }
+        if let int = value as? UInt16 {
+            try encode(int)
+            return
+        }
+        if let int = value as? UInt32 {
+            try encode(int)
+            return
+        }
+        if let int = value as? UInt64 {
+            try encode(int)
+            return
+        }
         if let double = value as? Double {
             try encode(double)
+            return
+        }
+        if let int = value as? Float {
+            try encode(int)
             return
         }
         
@@ -719,6 +993,13 @@ fileprivate struct BinarySingleValueEncodingContainer: SingleValueEncodingContai
     }
     
     mutating func encode(_ value: UInt) throws {
+        guard value <= UInt(Int64.max) else {
+            throw EncodingError.invalidValue(
+                value,
+                .init(codingPath: codingPath,
+                      debugDescription: "UInt too large for Int64 wire format: \(value)")
+            )
+        }
         storage.write(Int64(value))
     }
     
@@ -735,11 +1016,11 @@ fileprivate struct BinarySingleValueEncodingContainer: SingleValueEncodingContai
     }
     
     mutating func encode(_ value: UInt64) throws {
-        storage.write(Int64(truncatingIfNeeded: value))
+        storage.write(value)  // Native UInt64 encoding (version 2+)
     }
     
     mutating func encode(_ value: Float) throws {
-        try encode(Double(value))
+        storage.write(value)  // Native Float encoding (version 2+)
     }
 }
 

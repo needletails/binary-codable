@@ -13,38 +13,68 @@
 
 import Foundation
 
+// MARK: - Public entry point
+
 public struct BinaryDecoder: Sendable {
+    
+    /// The Magic header used to reliably detect what kind of data we are looking at before trying to parse it.
+    private static let magic: UInt32 = 0x4E54424E
     
     public init() {}
     
     public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
-        let storage = DecoderStorage(data: data)
-        let core = _BinaryDecoder(storage: storage)
-        
         // 1) Read and validate version
-        guard storage.offset < storage.data.count else {
+        guard !data.isEmpty else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: [],
                       debugDescription: "Empty data; missing version byte")
             )
         }
         
-        let version = storage.data[storage.offset]
-        storage.advanceOffset(1)
+        let version = data[0]
         
-        guard version == 1 else {
+        let storage = DecoderStorage(data: data, version: version)
+        storage.advanceOffset(1)  // Skip version byte
+        let core = _BinaryDecoder(storage: storage)
+        
+        guard version >= 1 else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: [],
                       debugDescription: "Unsupported binary format version \(version)")
             )
         }
         
-        // 2) Read encoded type name and compare canonically
-        let encodedTypeNameRaw = try core.readString()
-        let encodedCanonical   = canonicalEncodedTypeName(encodedTypeNameRaw)
-        let expectedCanonical  = canonicalTypeName(T.self)
+        if version == 1 {
+            // magic optional
+            let afterVersion = storage.offset
+            if storage.offset + 4 <= storage.data.count {
+                let possibleMagic = try core.readUInt32()
+                if possibleMagic != BinaryDecoder.magic {
+                    storage.setOffset(afterVersion) // old v1
+                }
+            }
+        } else if version >= 2 {
+            // magic required, native UInt64 and Float support (version 2+)
+            let m = try core.readUInt32()
+            guard m == BinaryDecoder.magic else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: storage.codingPath,
+                    debugDescription: "Bad magic header"
+                ))
+            }
+        } else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: storage.codingPath,
+                debugDescription: "Unsupported version \(version)"
+            ))
+        }
         
-        guard encodedCanonical == expectedCanonical else {
+        // 2) Read encoded type name and compare via descriptors
+        let encodedTypeNameRaw = try core.readString()
+        let encodedDesc   = descriptor(fromEncodedName: encodedTypeNameRaw)
+        let requestedDesc = descriptor(for: T.self)
+        
+        guard areCompatible(encodedDesc, requestedDesc) else {
             throw DecodingError.typeMismatch(
                 T.self,
                 .init(
@@ -77,17 +107,19 @@ public struct BinaryDecoder: Sendable {
     }
 }
 
+// MARK: - Shared state (storage)
 
-// The shared state (single cursor)
 fileprivate final class DecoderStorage: @unchecked Sendable {
     private(set) var data: Data
     private(set) var offset: Int
     private(set) var codingPath: [CodingKey]
+    let version: UInt8  // Track version for backward compatibility
     
-    init(data: Data, offset: Int = 0, codingPath: [CodingKey] = []) {
+    init(data: Data, offset: Int = 0, codingPath: [CodingKey] = [], version: UInt8 = 2) {
         self.data = data
         self.offset = offset
         self.codingPath = codingPath
+        self.version = version
     }
     
     func advanceOffset(_ offset: Int) {
@@ -115,7 +147,8 @@ fileprivate final class DecoderStorage: @unchecked Sendable {
     }
 }
 
-// Internal backing decoder
+// MARK: - Internal backing decoder
+
 fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
     
     let storage: DecoderStorage
@@ -179,8 +212,6 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         return Data(slice)
     }
     
-    
-    
     func readUUID() throws -> UUID {
         let size = 16
         let offset = storage.offset
@@ -204,8 +235,6 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         return UUID(uuid: bytes)
     }
     
-    
-    
     func readBool() throws -> Bool {
         let offset = storage.offset
         let d = storage.data
@@ -221,7 +250,6 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         storage.advanceOffset(1)
         return b != 0
     }
-    
     
     func readInt64() throws -> Int64 {
         let size = 8
@@ -244,6 +272,26 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         return Int64(bitPattern: bits)
     }
     
+    func readUInt64() throws -> UInt64 {
+        let size = 8
+        let offset = storage.offset
+        let d = storage.data
+        
+        guard offset + size <= d.count else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath,
+                      debugDescription: "Unexpected end of data while reading UInt64")
+            )
+        }
+        
+        var bits: UInt64 = 0
+        for i in 0..<size {
+            bits |= UInt64(d[offset + i]) << (UInt64(i) * 8)
+        }
+        
+        storage.advanceOffset(size)
+        return bits
+    }
     
     func readDouble() throws -> Double {
         let size = 8
@@ -264,6 +312,27 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         
         storage.advanceOffset(size)
         return Double(bitPattern: bits)
+    }
+    
+    func readFloat() throws -> Float {
+        let size = 4
+        let offset = storage.offset
+        let d = storage.data
+        
+        guard offset + size <= d.count else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath,
+                      debugDescription: "Unexpected end of data while reading Float")
+            )
+        }
+        
+        var bits: UInt32 = 0
+        for i in 0..<size {
+            bits |= UInt32(d[offset + i]) << (UInt32(i) * 8)
+        }
+        
+        storage.advanceOffset(size)
+        return Float(bitPattern: bits)
     }
     
     func readString() throws -> String {
@@ -327,7 +396,55 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         return b0 | b1 | b2 | b3
     }
     
+    // Read any FixedWidthInteger that was encoded as Int64 on the wire.
+    // Throws instead of trapping on overflow/out-of-range.
+    func readFixedWidthInteger<I: FixedWidthInteger>(_ type: I.Type) throws -> I {
+        let v64 = try readInt64()
+        
+        if I.isSigned {
+            // For signed types, check if min/max fit in Int64 before converting
+            // This is safe because all signed integer types have ranges that fit in Int64
+            let minV = Int64(I.min)
+            let maxV = Int64(I.max)
+            guard v64 >= minV, v64 <= maxV else {
+                throw DecodingError.dataCorrupted(
+                    .init(codingPath: codingPath,
+                          debugDescription: "\(I.self) out of range: \(v64)")
+                )
+            }
+            return I(v64)
+        } else {
+            // For unsigned types, I.max might be larger than Int64.max (e.g., UInt.max on 64-bit)
+            // So we need to check if I.max fits in Int64 first to avoid overflow
+            guard v64 >= 0 else {
+                throw DecodingError.dataCorrupted(
+                    .init(codingPath: codingPath,
+                          debugDescription: "\(I.self) out of range: \(v64)")
+                )
+            }
+            // Check if I.max can be represented as Int64 without overflow
+            // Compare as UInt64 to avoid overflow during comparison
+            if UInt64(I.max) <= UInt64(Int64.max) {
+                // Safe to convert I.max to Int64 for comparison
+                guard v64 <= Int64(I.max) else {
+                    throw DecodingError.dataCorrupted(
+                        .init(codingPath: codingPath,
+                              debugDescription: "\(I.self) out of range: \(v64)")
+                    )
+                }
+            } else {
+                // For types where max > Int64.max (like UInt on 64-bit), 
+                // we can only decode values that fit in Int64
+                // (values > Int64.max would have been truncated during encoding)
+                // v64 is already constrained to Int64 range, so this is fine
+            }
+            return I(v64)
+        }
+    }
+    
 }
+
+// MARK: - Keyed container
 
 fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingContainerProtocol, Sendable {
     typealias Key = Key
@@ -532,6 +649,45 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         }
     }
     
+    func decode(_ type: Int8.Type, forKey key: Key) throws -> Int8 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Int8.self, .init(codingPath: codingPath + [key],
+                                     debugDescription: "Expected Int8 but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(Int8.self)
+        }
+    }
+    
+    func decode(_ type: Int16.Type, forKey key: Key) throws -> Int16 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Int16.self, .init(codingPath: codingPath + [key],
+                                      debugDescription: "Expected Int16 but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(Int16.self)
+        }
+    }
+    
+    func decode(_ type: Int32.Type, forKey key: Key) throws -> Int32 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Int32.self, .init(codingPath: codingPath + [key],
+                                      debugDescription: "Expected Int32 but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(Int32.self)
+        }
+    }
+    
     func decode(_ type: Int64.Type, forKey key: Key) throws -> Int64 {
         try withValue(for: key) {
             let present = try decoder.readBool()
@@ -543,6 +699,94 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
                 )
             }
             return try decoder.readInt64()
+        }
+    }
+    
+    func decode(_ type: UInt.Type, forKey key: Key) throws -> UInt {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    UInt.self, .init(codingPath: codingPath + [key],
+                                     debugDescription: "Expected UInt but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(UInt.self)
+        }
+    }
+    
+    func decode(_ type: UInt8.Type, forKey key: Key) throws -> UInt8 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    UInt8.self, .init(codingPath: codingPath + [key],
+                                      debugDescription: "Expected UInt8 but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(UInt8.self)
+        }
+    }
+    
+    func decode(_ type: UInt16.Type, forKey key: Key) throws -> UInt16 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    UInt16.self, .init(codingPath: codingPath + [key],
+                                       debugDescription: "Expected UInt16 but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(UInt16.self)
+        }
+    }
+    
+    func decode(_ type: UInt32.Type, forKey key: Key) throws -> UInt32 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    UInt32.self, .init(codingPath: codingPath + [key],
+                                       debugDescription: "Expected UInt32 but found nil")
+                )
+            }
+            return try decoder.readFixedWidthInteger(UInt32.self)
+        }
+    }
+    
+    func decode(_ type: UInt64.Type, forKey key: Key) throws -> UInt64 {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    UInt64.self, .init(codingPath: codingPath + [key],
+                                       debugDescription: "Expected UInt64 but found nil")
+                )
+            }
+            // Use native UInt64 for version 2+, otherwise use Int64 conversion
+            if storage.version >= 2 {
+                return try decoder.readUInt64()
+            } else {
+                return try decoder.readFixedWidthInteger(UInt64.self)
+            }
+        }
+    }
+    
+    func decode(_ type: Float.Type, forKey key: Key) throws -> Float {
+        try withValue(for: key) {
+            let present = try decoder.readBool()
+            guard present else {
+                throw DecodingError.valueNotFound(
+                    Float.self, .init(codingPath: codingPath + [key],
+                                      debugDescription: "Expected Float but found nil")
+                )
+            }
+            // Use native Float for version 2+, otherwise use Double conversion
+            if storage.version >= 2 {
+                return try decoder.readFloat()
+            } else {
+                return Float(try decoder.readDouble())
+            }
         }
     }
     
@@ -565,6 +809,42 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         if type == Int.self {
             return try decode(Int.self, forKey: key) as! T
         }
+        if type == Int8.self {
+            return try decode(Int8.self, forKey: key) as! T
+        }
+        
+        if type == Int16.self {
+            return try decode(Int16.self, forKey: key) as! T
+        }
+        
+        if type == Int32.self {
+            return try decode(Int32.self, forKey: key) as! T
+        }
+        
+        if type == UInt.self {
+            return try decode(UInt.self, forKey: key) as! T
+        }
+        
+        if type == UInt8.self {
+            return try decode(UInt8.self, forKey: key) as! T
+        }
+        
+        if type == UInt16.self {
+            return try decode(UInt16.self, forKey: key) as! T
+        }
+        
+        if type == UInt32.self {
+            return try decode(UInt32.self, forKey: key) as! T
+        }
+        
+        if type == UInt64.self {
+            return try decode(UInt64.self, forKey: key) as! T
+        }
+        
+        if type == Float.self {
+            return try decode(Float.self, forKey: key) as! T
+        }
+        
         if type == Int64.self {
             return try decode(Int64.self, forKey: key) as! T
         }
@@ -572,9 +852,24 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
             return try decode(Double.self, forKey: key) as! T
         }
         
+        
         // Structured types: presence flag + nested Decodable.
         return try withValue(for: key) {
             let present = try decoder.readBool()
+            
+            if let optMeta = T.self as? _OptionalDecodingShim.Type {
+                if !present {
+                    return optMeta._nilValue() as! T
+                }
+                
+                storage.appendCodingPath(key)
+                defer { storage.removeLastKey() }
+                
+                // presence already consumed, so decode wrapped directly
+                return try optMeta._decodeWrapped(from: decoder) as! T
+            }
+            
+            // Non-optional: presence must be true
             guard present else {
                 throw DecodingError.valueNotFound(
                     T.self,
@@ -582,10 +877,12 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
                           debugDescription: "Expected \(T.self) but found nil")
                 )
             }
+            
             storage.appendCodingPath(key)
             defer { storage.removeLastKey() }
             return try T(from: decoder)
         }
+        
     }
     
     func decodeIfPresent<T>(_ type: T.Type, forKey key: Key) throws -> T? where T : Decodable {
@@ -627,8 +924,10 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     
     // MARK: - Nested containers
     
-    func nestedContainer<NestedKey>(keyedBy type: NestedKey.Type,
-                                    forKey key: Key) throws -> KeyedDecodingContainer<NestedKey> where NestedKey : CodingKey {
+    func nestedContainer<NestedKey>(
+        keyedBy type: NestedKey.Type,
+        forKey key: Key
+    ) throws -> KeyedDecodingContainer<NestedKey> where NestedKey : CodingKey {
         // Interpret the value for this key as a nested keyed container.
         return try withValue(for: key) {
             storage.appendCodingPath(key)
@@ -655,7 +954,7 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     }
 }
 
-
+// MARK: - Single value container
 
 fileprivate struct BinarySingleValueDecodingContainer: SingleValueDecodingContainer, Sendable {
     
@@ -691,8 +990,54 @@ fileprivate struct BinarySingleValueDecodingContainer: SingleValueDecodingContai
         return try decoder.readDouble()
     }
     
+    func decode(_ type: Float.Type) throws -> Float {
+        // Use native Float for version 2+, otherwise use Double conversion
+        if storage.version >= 2 {
+            return try decoder.readFloat()
+        } else {
+            return Float(try decoder.readDouble())
+        }
+    }
+    
     func decode(_ type: Int.Type) throws -> Int {
         return Int(try decoder.readInt64())
+    }
+    
+    func decode(_ type: Int8.Type) throws -> Int8 {
+        try decoder.readFixedWidthInteger(Int8.self)
+    }
+    
+    func decode(_ type: Int16.Type) throws -> Int16 {
+        try decoder.readFixedWidthInteger(Int16.self)
+    }
+    
+    func decode(_ type: Int32.Type) throws -> Int32 {
+        try decoder.readFixedWidthInteger(Int32.self)
+    }
+    
+    func decode(_ type: UInt.Type) throws -> UInt {
+        try decoder.readFixedWidthInteger(UInt.self)
+    }
+    
+    func decode(_ type: UInt8.Type) throws -> UInt8 {
+        try decoder.readFixedWidthInteger(UInt8.self)
+    }
+    
+    func decode(_ type: UInt16.Type) throws -> UInt16 {
+        try decoder.readFixedWidthInteger(UInt16.self)
+    }
+    
+    func decode(_ type: UInt32.Type) throws -> UInt32 {
+        try decoder.readFixedWidthInteger(UInt32.self)
+    }
+    
+    func decode(_ type: UInt64.Type) throws -> UInt64 {
+        // Use native UInt64 for version 2+, otherwise use Int64 conversion
+        if storage.version >= 2 {
+            return try decoder.readUInt64()
+        } else {
+            return try decoder.readFixedWidthInteger(UInt64.self)
+        }
     }
     
     func decode(_ type: Int64.Type) throws -> Int64 {
@@ -739,7 +1084,7 @@ fileprivate struct BinarySingleValueDecodingContainer: SingleValueDecodingContai
     }
 }
 
-
+// MARK: - Unkeyed container
 
 fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sendable {
     
@@ -917,8 +1262,71 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
                 // element is nil
                 return optMeta._nilValue() as! T
             } else {
+                // For optional values in unkeyed containers, decode the wrapped value
+                // directly from the unkeyed container context, not from a single-value container
+                // The presence flag has already been read, so we decode the value directly
                 storage.appendCodingPath(ArrayIndexKey(currentIndex))
                 defer { storage.removeLastKey() }
+                
+                // Get the wrapped type and decode it directly (no presence flag, already read)
+                if let wrappedType = (T.self as? _OptionalMarker.Type)?._wrappedType {
+                    // Decode the wrapped value directly without reading another presence flag
+                    if wrappedType == Int.self {
+                        let v = Int(try decoder.readInt64())
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Int8.self {
+                        let v: Int8 = try decoder.readFixedWidthInteger(Int8.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Int16.self {
+                        let v: Int16 = try decoder.readFixedWidthInteger(Int16.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Int32.self {
+                        let v: Int32 = try decoder.readFixedWidthInteger(Int32.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Int64.self {
+                        let v = try decoder.readInt64()
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == UInt.self {
+                        let v: UInt = try decoder.readFixedWidthInteger(UInt.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == UInt8.self {
+                        let v: UInt8 = try decoder.readFixedWidthInteger(UInt8.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == UInt16.self {
+                        let v: UInt16 = try decoder.readFixedWidthInteger(UInt16.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == UInt32.self {
+                        let v: UInt32 = try decoder.readFixedWidthInteger(UInt32.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == UInt64.self {
+                        let v: UInt64 = storage.version >= 2 
+                            ? try decoder.readUInt64() 
+                            : try decoder.readFixedWidthInteger(UInt64.self)
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == String.self {
+                        let v = try decoder.readString()
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Bool.self {
+                        let v = try decoder.readBool()
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Double.self {
+                        let v = try decoder.readDouble()
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Float.self {
+                        let v = storage.version >= 2 
+                            ? try decoder.readFloat() 
+                            : Float(try decoder.readDouble())
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == Data.self {
+                        let v = try decoder.readData()
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    } else if wrappedType == UUID.self {
+                        let v = try decoder.readUUID()
+                        return (v as? T) ?? optMeta._nilValue() as! T
+                    }
+                }
+                
+                // Fallback to the original method for complex types
                 return try optMeta._decodeWrapped(from: decoder) as! T
             }
         }
@@ -958,6 +1366,56 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
             currentIndex += 1
             return v as! T
         }
+        if type == Int8.self {
+            let v: Int8 = try decoder.readFixedWidthInteger(Int8.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == Int16.self {
+            let v: Int16 = try decoder.readFixedWidthInteger(Int16.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == Int32.self {
+            let v: Int32 = try decoder.readFixedWidthInteger(Int32.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == UInt.self {
+            let v: UInt = try decoder.readFixedWidthInteger(UInt.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == UInt8.self {
+            let v: UInt8 = try decoder.readFixedWidthInteger(UInt8.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == UInt16.self {
+            let v: UInt16 = try decoder.readFixedWidthInteger(UInt16.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == UInt32.self {
+            let v: UInt32 = try decoder.readFixedWidthInteger(UInt32.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == UInt64.self {
+            let v: UInt64 = storage.version >= 2 
+                ? try decoder.readUInt64() 
+                : try decoder.readFixedWidthInteger(UInt64.self)
+            currentIndex += 1
+            return v as! T
+        }
+        if type == Float.self {
+            let v = storage.version >= 2 
+                ? try decoder.readFloat() 
+                : Float(try decoder.readDouble())
+            currentIndex += 1
+            return v as! T
+        }
+        
         if type == Int64.self {
             let v = try decoder.readInt64()
             currentIndex += 1
@@ -977,10 +1435,11 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
         return value
     }
     
-    
     // MARK: - Nested containers
     
-    mutating func nestedContainer<NestedKey>(keyedBy type: NestedKey.Type) throws -> KeyedDecodingContainer<NestedKey> where NestedKey : CodingKey {
+    mutating func nestedContainer<NestedKey>(
+        keyedBy type: NestedKey.Type
+    ) throws -> KeyedDecodingContainer<NestedKey> where NestedKey : CodingKey {
         try checkNotAtEnd()
         let present = try decoder.readBool()
         guard present else {
@@ -1042,7 +1501,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
 }
 
 // Helper struct for array index coding keys
-fileprivate struct ArrayIndexKey: CodingKey {
+fileprivate struct ArrayIndexKey: CodingKey, Sendable {
     var stringValue: String {
         return "\(intValue ?? -1)"
     }
@@ -1075,6 +1534,7 @@ fileprivate struct ArrayIndexKey: CodingKey {
 // - Field:   1-byte presence flag, then value if present
 // - Array:   UInt32 count (LE) + [presence flag + value] for each element
 
+// MARK: - Optional shims
 
 protocol _OptionalEncodingShim {
     var _isNil: Bool { get }
@@ -1104,7 +1564,18 @@ extension Optional: _OptionalDecodingShim where Wrapped: Decodable {
     }
 }
 
-// MARK: - Optional-aware type canonicalization
+// MARK: - Canonical type descriptors (for header matching)
+
+fileprivate enum TypeCategory: Sendable {
+    case primitiveOrStd    // Int, String, Array<...>, Set<...>, Dictionary<...>, Data, UUID, etc.
+    case custom            // Your own types like AuthPacket, ChannelInfo, etc.
+}
+
+fileprivate struct CanonicalTypeDescriptor: Equatable, Sendable {
+    let coreName: String   // module-stripped, container+generics kept (e.g. "Array<Swift.String>")
+    let isOptional: Bool
+    let category: TypeCategory
+}
 
 fileprivate protocol _OptionalMarker {
     static var _wrappedType: Any.Type { get }
@@ -1114,24 +1585,137 @@ extension Optional: _OptionalMarker {
     static var _wrappedType: Any.Type { Wrapped.self }
 }
 
-/// Canonical (schema) type name for a Swift type.
-/// `Optional<T>` and `T` both canonicalize to the same string.
-fileprivate func canonicalTypeName(_ type: Any.Type) -> String {
-    if let opt = type as? _OptionalMarker.Type {
-        return String(reflecting: opt._wrappedType) // inner T
-    } else {
-        return String(reflecting: type)
+/// Compute a "core" name from a fully qualified type string.
+///
+/// Non-generic types:
+///   "BinaryCodableTests.IRC.AuthPacket"  -> "AuthPacket"
+///   "NeedleTailIRC.AuthPacket"          -> "AuthPacket"
+///
+/// Generic types:
+///   "Swift.Array<Swift.String>"         -> "Array<Swift.String>"
+///   "Swift.Set<Swift.String>"           -> "Set<Swift.String>"
+///   "Swift.Dictionary<Swift.String,Swift.Int>" -> "Dictionary<Swift.String,Swift.Int>"
+///
+/// Other generic types:
+///   "MyMod.Foo<Other.Bar.Baz>"          -> "Foo<Other.Bar.Baz>"
+fileprivate func canonicalCoreNameString(_ full: String) -> String {
+    // Generic case
+    if let angleIndex = full.firstIndex(of: "<") {
+        let prefixPart = String(full[..<angleIndex])   // e.g. "Swift.Array"
+        let genericsPart = String(full[angleIndex...]) // e.g. "<Swift.String>"
+        
+        let simpleContainer: String
+        if prefixPart.hasSuffix("Array") {
+            simpleContainer = "Array"
+        } else if prefixPart.hasSuffix("Set") {
+            simpleContainer = "Set"
+        } else if prefixPart.hasSuffix("Dictionary") {
+            simpleContainer = "Dictionary"
+        } else {
+            // Unknown generic: just take last path component
+            let last = prefixPart.split(separator: ".").last ?? Substring(prefixPart)
+            simpleContainer = String(last)
+        }
+        
+        return "\(simpleContainer)\(genericsPart)"
     }
+    
+    // Non-generic: keep simple name (last component)
+    if let last = full.split(separator: ".").last {
+        return String(last)
+    }
+    return full
 }
 
-/// Canonicalize an encoded type-name string.
-/// If it's `Swift.Optional<Foo.Bar>`, we return `Foo.Bar`.
-fileprivate func canonicalEncodedTypeName(_ name: String) -> String {
-    let prefix = "Swift.Optional<"
-    let suffix = ">"
-    if name.hasPrefix(prefix), name.hasSuffix(suffix) {
-        let inner = name.dropFirst(prefix.count).dropLast(suffix.count)
-        return String(inner)
+fileprivate func isPrimitiveOrStdCoreName(_ coreName: String) -> Bool {
+    // Basic primitives
+    let primitives: Set<String> = [
+        "Int", "Int8", "Int16", "Int32", "Int64",
+        "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+        "String", "Bool", "Double", "Float",
+        "Data", "UUID"
+    ]
+    
+    if primitives.contains(coreName) {
+        return true
     }
-    return name
+    
+    // Standard containers
+    if coreName.hasPrefix("Array<") { return true }
+    if coreName.hasPrefix("Set<") { return true }
+    if coreName.hasPrefix("Dictionary<") { return true }
+    
+    return false
+}
+
+/// Canonical descriptor for a Swift type `T`
+/// - Strips Optional (but records it as `isOptional`)
+/// - Reduces fully qualified name to a "core" name (module-agnostic)
+/// - Categorizes as primitive/std vs custom
+fileprivate func descriptor(for type: Any.Type) -> CanonicalTypeDescriptor {
+    let isOpt: Bool
+    let underlying: Any.Type
+    
+    if let opt = type as? _OptionalMarker.Type {
+        isOpt = true
+        underlying = opt._wrappedType
+    } else {
+        isOpt = false
+        underlying = type
+    }
+    
+    let full = String(reflecting: underlying)
+    let core = canonicalCoreNameString(full)
+    let category: TypeCategory = isPrimitiveOrStdCoreName(core) ? .primitiveOrStd : .custom
+    
+    return CanonicalTypeDescriptor(coreName: core, isOptional: isOpt, category: category)
+}
+
+/// Canonical descriptor parsed from the encoded type-name header.
+/// Handles Optional wrappers and reduces inner type string to the same
+/// core-name format as `descriptor(for:)`.
+fileprivate func descriptor(fromEncodedName name: String) -> CanonicalTypeDescriptor {
+    let swiftOptPrefix = "Swift.Optional<"
+    let plainOptPrefix = "Optional<"
+    let optSuffix      = ">"
+    
+    let isOpt: Bool
+    let innerRaw: String
+    
+    if name.hasPrefix(swiftOptPrefix), name.hasSuffix(optSuffix) {
+        isOpt = true
+        innerRaw = String(name.dropFirst(swiftOptPrefix.count).dropLast(optSuffix.count))
+    } else if name.hasPrefix(plainOptPrefix), name.hasSuffix(optSuffix) {
+        isOpt = true
+        innerRaw = String(name.dropFirst(plainOptPrefix.count).dropLast(optSuffix.count))
+    } else {
+        isOpt = false
+        innerRaw = name
+    }
+    
+    let core = canonicalCoreNameString(innerRaw)
+    let category: TypeCategory = isPrimitiveOrStdCoreName(core) ? .primitiveOrStd : .custom
+    
+    return CanonicalTypeDescriptor(coreName: core, isOptional: isOpt, category: category)
+}
+
+/// Our compatibility rule:
+/// - `coreName` must match (so Set<String> vs Array<String> is always a mismatch)
+/// - if both `.custom`, we ignore `isOptional`
+///   -> Optional<AuthPacket> <-> AuthPacket OK
+///   -> IRC.AuthPacket <-> Server.AuthPacket OK
+/// - otherwise (primitives / std containers), `isOptional` must match
+///   -> Int? -> Int is NOT OK
+fileprivate func areCompatible(_ encoded: CanonicalTypeDescriptor,
+                               _ requested: CanonicalTypeDescriptor) -> Bool {
+    guard encoded.coreName == requested.coreName else { return false }
+    
+    switch (encoded.category, requested.category) {
+    case (.custom, .custom):
+        // Custom model types: allow Optional vs non-Optional
+        return true
+    default:
+        // Primitives / std containers: Optional must match
+        return encoded.isOptional == requested.isOptional
+    }
 }

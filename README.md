@@ -17,7 +17,6 @@ A high-performance, type-safe binary encoding and decoding library for Swift tha
   - Arrays: `[T]` for any `Codable` type
   - Optionals: `T?` for any `Codable` type
   - Nested structures and complex objects
-- 🔒 **Security** - Built-in DoS protection with configurable limits
 - 🎯 **Zero Dependencies** - Pure Swift implementation using Foundation
 
 ## 📋 Requirements
@@ -146,12 +145,41 @@ The binary format uses little-endian encoding for all multi-byte values:
 
 - **Bool**: 1 byte (0 or 1)
 - **Int64**: 8 bytes, little-endian
+- **UInt64**: 8 bytes, little-endian, native unsigned encoding
 - **Double**: 8 bytes, IEEE 754, little-endian
+- **Float**: 4 bytes, IEEE 754, little-endian, native 32-bit encoding
 - **UUID**: 16 raw bytes
 - **String**: UInt32 length (LE) + UTF-8 bytes
 - **Data**: UInt32 length (LE) + raw bytes
 - **Field**: 1-byte presence flag, then value if present
 - **Array**: UInt32 count (LE) + [presence flag + value] for each element
+
+**Version 2 Format**: Header consists of:
+1. Version byte (2)
+2. Magic header (4 bytes: `0x4E54424E`)
+3. Type name (UInt32 length + UTF-8 string)
+4. Payload (encoded data)
+
+## 📋 Version Compatibility
+
+BinaryCodable uses version 2 format for all encodings, which provides full support for all types with no limitations. The decoder automatically handles backward compatibility with version 1 format.
+
+### Current Format (Version 2)
+
+- **Full UInt64 Range**: Native 64-bit unsigned encoding supports the complete range 
+  (0 to 18,446,744,073,709,551,615)
+- **Exact Float Precision**: Native 32-bit IEEE 754 encoding preserves exact precision
+- **No Limitations**: All types are encoded with their native representations
+
+### Legacy Format (Version 1)
+
+When decoding version 1 data, the following limitations apply:
+
+- **UInt/UInt64**: Limited to ≤ `Int64.max` (9,223,372,036,854,775,807) due to Int64 wire format
+- **Float**: Encoded as Double (64-bit), which may cause slight precision differences
+- **Magic Header**: Optional in version 1, required in version 2+
+
+> **Note**: All new encodings use version 2 format with no limitations. Legacy format limitations only affect decoding of data created with version 1 of the library.
 
 ## 🔒 Security
 
