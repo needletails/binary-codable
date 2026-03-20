@@ -178,6 +178,236 @@ struct BinaryCodableTests {
         #expect(decoded == someUUIDs)
     }
     
+    /// v2 layout: 1 byte version, 4 byte LE magic, UInt32 LE UTF-8 length + type name, then payload.
+    private func binaryReplacingWireTypeName(_ encoded: Data, newTypeName: String) -> Data {
+        precondition(encoded.count >= 9)
+        let lenOffset = 5
+        let b0 = UInt32(encoded[lenOffset])
+        let b1 = UInt32(encoded[lenOffset + 1]) << 8
+        let b2 = UInt32(encoded[lenOffset + 2]) << 16
+        let b3 = UInt32(encoded[lenOffset + 3]) << 24
+        let oldLen = Int(b0 | b1 | b2 | b3)
+        let payloadStart = lenOffset + 4 + oldLen
+        precondition(payloadStart <= encoded.count)
+        let payload = encoded[payloadStart...]
+        var out = Data()
+        out.append(encoded[..<lenOffset])
+        var n = UInt32(newTypeName.utf8.count).littleEndian
+        withUnsafeBytes(of: &n) { out.append(contentsOf: $0) }
+        out.append(contentsOf: newTypeName.utf8)
+        out.append(payload)
+        return out
+    }
+    
+    @Test("Binary Decoder accepts Array<UUID> header from FoundationEssentials spelling")
+    func testBinaryUUIDArray_FoundationEssentialsTypeHeaderAccepted() async throws {
+        let someUUIDs = [UUID(), UUID()]
+        let encoded = try BinaryEncoder().encode(someUUIDs)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Array<FoundationEssentials.UUID>"
+        )
+        let decoded = try BinaryDecoder().decode([UUID].self, from: forged)
+        #expect(decoded == someUUIDs)
+    }
+    
+    @Test("BinaryDecoder rejects input larger than maximumInputByteCount")
+    func testBinaryDecoder_maximumInputByteCount() async throws {
+        let payload = Data(repeating: 0, count: 500)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumInputByteCount: 100)
+        )
+        #expect(throws: Error.self) {
+            _ = try decoder.decode(Int.self, from: payload)
+        }
+    }
+    
+    /// v2 only: version byte, magic LE, UInt32 LE claimed type-name UTF-8 length (payload bytes omitted).
+    private func binaryV2PrefixWithClaimedTypeNameUTF8Length(_ utf8Length: UInt32) -> Data {
+        var d = Data()
+        d.append(2)
+        let magic: UInt32 = 0x4E54424E
+        withUnsafeBytes(of: magic.littleEndian) { d.append(contentsOf: $0) }
+        var leLen = utf8Length.littleEndian
+        withUnsafeBytes(of: &leLen) { d.append(contentsOf: $0) }
+        return d
+    }
+    
+    @Test("BinaryDecoder rejects type header UTF-8 length above maximumTypeHeaderUTF8ByteCount")
+    func testBinaryDecoder_typeHeaderExceedsMaximumUTF8Length() async throws {
+        let cap: UInt32 = 1024
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumTypeHeaderUTF8ByteCount: Int(cap))
+        )
+        let stub = binaryV2PrefixWithClaimedTypeNameUTF8Length(cap + 500)
+        #expect(throws: Error.self) {
+            _ = try decoder.decode(Int.self, from: stub)
+        }
+    }
+    
+    @Test("BinaryDecoder rejects string payload above maximumStringUTF8ByteCount")
+    func testBinaryDecoder_maximumStringUTF8ByteCount() async throws {
+        let long = String(repeating: "x", count: 200)
+        let encoded = try BinaryEncoder().encode(long)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumStringUTF8ByteCount: 100)
+        )
+        #expect(throws: Error.self) {
+            _ = try decoder.decode(String.self, from: encoded)
+        }
+    }
+    
+    @Test("BinaryDecoder rejects Data payload above maximumDataByteCount")
+    func testBinaryDecoder_maximumDataByteCount() async throws {
+        let blob = Data(repeating: 7, count: 80)
+        let encoded = try BinaryEncoder().encode(blob)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumDataByteCount: 40)
+        )
+        #expect(throws: Error.self) {
+            _ = try decoder.decode(Data.self, from: encoded)
+        }
+    }
+    
+    @Test("BinaryDecoder rejects array with element count above maximumCollectionElementCount")
+    func testBinaryDecoder_maximumCollectionElementCount_array() async throws {
+        let values = Array(0..<50)
+        let encoded = try BinaryEncoder().encode(values)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumCollectionElementCount: 10)
+        )
+        #expect(throws: Error.self) {
+            _ = try decoder.decode([Int].self, from: encoded)
+        }
+    }
+    
+    @Test("BinaryDecoder rejects dictionary with key count above maximumCollectionElementCount")
+    func testBinaryDecoder_maximumCollectionElementCount_dictionary() async throws {
+        var dict: [String: Int] = [:]
+        for i in 0..<30 {
+            dict["k\(i)"] = i
+        }
+        let encoded = try BinaryEncoder().encode(dict)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumCollectionElementCount: 5)
+        )
+        #expect(throws: Error.self) {
+            _ = try decoder.decode([String: Int].self, from: encoded)
+        }
+    }
+    
+    @Test("BinaryDecoder with recommendedForUntrustedInput decodes typical payloads")
+    func testBinaryDecoder_recommendedForUntrustedInput_typicalPayload() async throws {
+        let decoder = BinaryDecoder(limits: .recommendedForUntrustedInput)
+        let uuids = [UUID(), UUID()]
+        let encoded = try BinaryEncoder().encode(uuids)
+        let decoded = try decoder.decode([UUID].self, from: encoded)
+        #expect(decoded == uuids)
+    }
+    
+    @Test("BinaryDecodingLimits ignore negative optional caps and keep decode functional")
+    func testBinaryDecodingLimits_negativeOptionalCapsAreIgnored() async throws {
+        let values = [1, 2, 3]
+        let encoded = try BinaryEncoder().encode(values)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(
+                maximumInputByteCount: -1,
+                maximumStringUTF8ByteCount: -1,
+                maximumDataByteCount: -1,
+                maximumCollectionElementCount: -1
+            )
+        )
+        let decoded = try decoder.decode([Int].self, from: encoded)
+        #expect(decoded == values)
+    }
+    
+    @Test("BinaryDecodingLimits negative type header cap falls back to safe default")
+    func testBinaryDecodingLimits_negativeTypeHeaderCapFallback() async throws {
+        let values = [1, 2, 3]
+        let encoded = try BinaryEncoder().encode(values)
+        let decoder = BinaryDecoder(
+            limits: BinaryDecodingLimits(maximumTypeHeaderUTF8ByteCount: -1)
+        )
+        let decoded = try decoder.decode([Int].self, from: encoded)
+        #expect(decoded == values)
+    }
+    
+    @Test("Binary Decoder accepts Set<UUID> with FoundationEssentials spelling in wire header")
+    func testBinarySetUUID_FoundationEssentialsTypeHeaderAccepted() async throws {
+        let u1 = UUID(), u2 = UUID()
+        let set: Set<UUID> = [u1, u2]
+        let encoded = try BinaryEncoder().encode(set)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Set<FoundationEssentials.UUID>"
+        )
+        let decoded = try BinaryDecoder().decode(Set<UUID>.self, from: forged)
+        #expect(decoded == set)
+    }
+    
+    @Test("Binary Decoder accepts Dictionary<UUID,String> with FoundationEssentials key in wire header")
+    func testBinaryDictionaryUUIDString_FoundationEssentialsTypeHeaderAccepted() async throws {
+        let id = UUID()
+        let dict: [UUID: String] = [id: "needle"]
+        let encoded = try BinaryEncoder().encode(dict)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Dictionary<FoundationEssentials.UUID, Swift.String>"
+        )
+        let decoded = try BinaryDecoder().decode([UUID: String].self, from: forged)
+        #expect(decoded == dict)
+    }
+    
+    @Test("Binary Decoder accepts dictionary UUID header when spacing differs")
+    func testBinaryDictionaryUUIDString_spacingDifferenceAccepted() async throws {
+        let id = UUID()
+        let dict: [UUID: String] = [id: "needle"]
+        let encoded = try BinaryEncoder().encode(dict)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Dictionary<FoundationEssentials.UUID,Swift.String>"
+        )
+        let decoded = try BinaryDecoder().decode([UUID: String].self, from: forged)
+        #expect(decoded == dict)
+    }
+    
+    @Test("Binary Decoder accepts [[UUID]] with FoundationEssentials in inner array wire header")
+    func testBinaryNestedUUIDArray_FoundationEssentialsTypeHeaderAccepted() async throws {
+        let inner = [UUID(), UUID()]
+        let outer = [inner]
+        let encoded = try BinaryEncoder().encode(outer)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Array<Swift.Array<FoundationEssentials.UUID>>"
+        )
+        let decoded = try BinaryDecoder().decode([[UUID]].self, from: forged)
+        #expect(decoded == outer)
+    }
+    
+    @Test("Binary Decoder accepts [Date] with FoundationEssentials.Date spelling in wire header")
+    func testBinaryDateArray_FoundationEssentialsTypeHeaderAccepted() async throws {
+        let dates = [Date(timeIntervalSince1970: 1_700_000_000), Date(timeIntervalSince1970: 1_800_000_000)]
+        let encoded = try BinaryEncoder().encode(dates)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Array<FoundationEssentials.Date>"
+        )
+        let decoded = try BinaryDecoder().decode([Date].self, from: forged)
+        #expect(decoded == dates)
+    }
+    
+    @Test("Type mismatch error mentions normalized wire identity")
+    func testBinaryDecoder_typeMismatchMessageUsesNormalizedIdentity() async throws {
+        let encoded = try BinaryEncoder().encode(42)
+        do {
+            _ = try BinaryDecoder().decode(String.self, from: encoded)
+            Issue.record("Expected decoding to fail with type mismatch")
+        } catch {
+            let text = String(describing: error)
+            #expect(text.contains("normalized wire identity"))
+        }
+    }
+    
     @Test("Binary Encoder/Decoder Array of Double Test")
     func testBinaryDoubleArrayEncodingDecoding() async throws {
         // Test with various Double values including pi

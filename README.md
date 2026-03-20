@@ -183,14 +183,56 @@ When decoding version 1 data, the following limitations apply:
 
 ## 🔒 Security
 
-BinaryCodable has no explicit size limits and is only constrained by available system memory. This allows the library to handle data of any size, making it suitable for a wide range of applications including:
+### Integrity and authenticity (fixing the “no authentication” gap)
 
-- Large images or media files
-- Extensive document content
-- Large datasets or bulk operations
-- Scientific computing applications
+`BinaryEncoder` / `BinaryDecoder` only answer: “do these bytes parse as `T`?” They do **not** prove who created the data or that it was not modified. The type header and payload are **untrusted** unless you wrap them in a stronger boundary.
 
-> **Note**: When processing untrusted data, consider implementing your own size limits or validation based on your application's security requirements and available system resources.
+**What to do instead:**
+
+1. **MAC or sign the encoded `Data`** — Treat `try BinaryEncoder().encode(value)` as the **inner** payload. Build an **outer envelope** you verify *before* calling `BinaryDecoder`:
+   - **HMAC** (e.g. SHA-256 with a shared secret) over the full inner bytes, or
+   - **Ed25519 / ECDSA** (asymmetric) if only the sender should be able to produce valid messages.
+
+   Verify the tag/signature first; only then decode with `BinaryDecoder`.
+
+2. **Use TLS (or QUIC)** for data in motion — Protects on the wire but does **not** replace a MAC/signature for **at-rest** blobs, offline verification, or end-to-end trust between app layers.
+
+3. **Encryption** — If the payload is sensitive, encrypt the same inner `Data` (or a larger envelope that includes nonce + ciphertext + tag, e.g. AES-GCM) **in addition to** authentication. Prefer **encrypt-then-MAC** or an AEAD mode that already combines both.
+
+4. **Replay** — If ordering matters, include a **monotonic counter, nonce, or timestamp** inside the signed bytes and reject duplicates or stale values in your protocol.
+
+**Minimal pattern (conceptual):**
+
+```swift
+// After encoding
+let inner = try BinaryEncoder().encode(model)
+let tag = computeHMACSHA256(key: sharedSecret, data: inner) // or Ed25519 signature, etc.
+let wire = composeEnvelope(tag: tag, payload: inner)       // your layout: length-prefixed fields
+
+// Before decoding
+let (tag, inner) = try parseEnvelope(wire)
+guard validateHMACSHA256(key: sharedSecret, data: inner, tag: tag) else {
+    throw MyError.authenticityFailed
+}
+let model = try BinaryDecoder().decode(MyModel.self, from: inner)
+```
+
+On Apple platforms, [CryptoKit](https://developer.apple.com/documentation/cryptokit) provides HMAC and signatures; on Linux/Android, use [swift-crypto](https://github.com/apple/swift-crypto) with the same algorithms so all peers agree on the wire format.
+
+This library intentionally stays **dependency-free**; cryptography belongs in your app or a small companion package that owns keys and protocol versioning.
+
+### Untrusted input and size limits
+
+`BinaryDecoder` accepts optional `BinaryDecodingLimits` (see `BinaryDecoder.init(limits:)`):
+
+- **Default** — Same openness as before for trusted payloads, except the **wire type-name header** is capped (256 KiB UTF-8) so a bogus length cannot force a huge string allocation.
+- **`BinaryDecodingLimits.recommendedForUntrustedInput`** — Starting point with caps on total input size, per-string and per-`Data` lengths, and collection counts; tune for your protocol (e.g. raise limits for large media).
+
+These limits reduce **denial-of-service** from malicious lengths; they do **not** replace **authentication** (MAC/signature) above.
+
+For trusted, very large blobs you can still use `.default` or set `nil` caps where appropriate.
+
+BinaryCodable is otherwise only constrained by available system memory, which suits large local files and bulk operations when the source is trusted.
 
 ## 🧪 Testing
 

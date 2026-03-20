@@ -13,6 +13,59 @@
 
 import Foundation
 
+// MARK: - Decoding limits (untrusted input)
+
+/// Optional upper bounds while decoding. Use ``BinaryDecodingLimits/recommendedForUntrustedInput`` (or your own caps)
+/// when `Data` may come from a peer, clipboard, or other untrusted source, so absurd lengths cannot force huge
+/// allocations or excessive work.
+///
+/// ``BinaryDecodingLimits/default`` keeps behavior close to previous releases for trusted inputs, except that the
+/// wire type-name header is always capped (see ``BinaryDecodingLimits/maximumTypeHeaderUTF8ByteCount``).
+public struct BinaryDecodingLimits: Sendable, Equatable {
+    /// If set, rejects inputs whose `Data.count` exceeds this before any parsing.
+    public var maximumInputByteCount: Int?
+    /// Maximum UTF-8 byte length for the type string after the version and magic header. Always enforced.
+    public var maximumTypeHeaderUTF8ByteCount: Int
+    /// If set, rejects any string whose declared UTF-8 length exceeds this.
+    public var maximumStringUTF8ByteCount: Int?
+    /// If set, rejects any `Data` value whose declared byte length exceeds this.
+    public var maximumDataByteCount: Int?
+    /// If set, rejects keyed containers with more keys and unkeyed arrays with more elements than this.
+    public var maximumCollectionElementCount: Int?
+    
+    public init(
+        maximumInputByteCount: Int? = nil,
+        maximumTypeHeaderUTF8ByteCount: Int = 262_144,
+        maximumStringUTF8ByteCount: Int? = nil,
+        maximumDataByteCount: Int? = nil,
+        maximumCollectionElementCount: Int? = nil
+    ) {
+        // Negative optional caps are treated as "unset" so misconfiguration
+        // does not accidentally reject every payload.
+        self.maximumInputByteCount = maximumInputByteCount.flatMap { $0 >= 0 ? $0 : nil }
+        self.maximumStringUTF8ByteCount = maximumStringUTF8ByteCount.flatMap { $0 >= 0 ? $0 : nil }
+        self.maximumDataByteCount = maximumDataByteCount.flatMap { $0 >= 0 ? $0 : nil }
+        self.maximumCollectionElementCount = maximumCollectionElementCount.flatMap { $0 >= 0 ? $0 : nil }
+        
+        // Required cap always enforced; restore safe default if caller passes a negative.
+        self.maximumTypeHeaderUTF8ByteCount = maximumTypeHeaderUTF8ByteCount >= 0
+            ? maximumTypeHeaderUTF8ByteCount
+            : 262_144
+    }
+    
+    /// Preserves open-ended string/data/array sizes; still caps the type header string.
+    public static let `default` = BinaryDecodingLimits()
+    
+    /// Starting point for decoding untrusted blobs; tune for your protocol (e.g. raise `maximumInputByteCount` for media).
+    public static let recommendedForUntrustedInput = BinaryDecodingLimits(
+        maximumInputByteCount: 64 * 1024 * 1024,
+        maximumTypeHeaderUTF8ByteCount: 262_144,
+        maximumStringUTF8ByteCount: 16 * 1024 * 1024,
+        maximumDataByteCount: 64 * 1024 * 1024,
+        maximumCollectionElementCount: 10_000_000
+    )
+}
+
 // MARK: - Public entry point
 
 public struct BinaryDecoder: Sendable {
@@ -20,9 +73,20 @@ public struct BinaryDecoder: Sendable {
     /// The Magic header used to reliably detect what kind of data we are looking at before trying to parse it.
     private static let magic: UInt32 = 0x4E54424E
     
-    public init() {}
+    private let limits: BinaryDecodingLimits
+    
+    public init(limits: BinaryDecodingLimits = .default) {
+        self.limits = limits
+    }
     
     public func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        if let max = limits.maximumInputByteCount, data.count > max {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [],
+                      debugDescription: "Input length \(data.count) exceeds maximum allowed \(max) bytes")
+            )
+        }
+        
         // 1) Read and validate version
         guard !data.isEmpty else {
             throw DecodingError.dataCorrupted(
@@ -33,7 +97,7 @@ public struct BinaryDecoder: Sendable {
         
         let version = data[0]
         
-        let storage = DecoderStorage(data: data, version: version)
+        let storage = DecoderStorage(data: data, version: version, limits: limits)
         storage.advanceOffset(1)  // Skip version byte
         let core = _BinaryDecoder(storage: storage)
         
@@ -70,16 +134,22 @@ public struct BinaryDecoder: Sendable {
         }
         
         // 2) Read encoded type name and compare via descriptors
-        let encodedTypeNameRaw = try core.readString()
+        let encodedTypeNameRaw = try core.readString(utf8ByteCap: limits.maximumTypeHeaderUTF8ByteCount)
         let encodedDesc   = descriptor(fromEncodedName: encodedTypeNameRaw)
         let requestedDesc = descriptor(for: T.self)
         
         guard areCompatible(encodedDesc, requestedDesc) else {
+            // Compare normalized structural identity (see `normalizeStdlibModuleQualifiersInCoreName`),
+            // not raw `String(reflecting:)`, so module provenance (e.g. Foundation vs FoundationEssentials)
+            // does not cause spurious failures or misleading logs.
             throw DecodingError.typeMismatch(
                 T.self,
                 .init(
                     codingPath: storage.codingPath,
-                    debugDescription: "Type mismatch: encoded as \(encodedTypeNameRaw), requested \(String(reflecting: T.self))"
+                    debugDescription: "Type mismatch: normalized wire identity \"\(encodedDesc.coreName)\" " +
+                        "does not match requested \"\(requestedDesc.coreName)\". " +
+                        "(Swift/Foundation/FoundationEssentials qualifiers in generic arguments are ignored for this comparison.) " +
+                        "Original encoded header: \(encodedTypeNameRaw)"
                 )
             )
         }
@@ -114,12 +184,14 @@ fileprivate final class DecoderStorage: @unchecked Sendable {
     private(set) var offset: Int
     private(set) var codingPath: [CodingKey]
     let version: UInt8  // Track version for backward compatibility
+    let limits: BinaryDecodingLimits
     
-    init(data: Data, offset: Int = 0, codingPath: [CodingKey] = [], version: UInt8 = 2) {
+    init(data: Data, offset: Int = 0, codingPath: [CodingKey] = [], version: UInt8 = 2, limits: BinaryDecodingLimits) {
         self.data = data
         self.offset = offset
         self.codingPath = codingPath
         self.version = version
+        self.limits = limits
     }
     
     func advanceOffset(_ offset: Int) {
@@ -168,7 +240,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
     }
     
     func unkeyedContainer() throws -> any UnkeyedDecodingContainer {
-        return BinaryUnkeyedDecodingContainer(decoder: self)
+        return try BinaryUnkeyedDecodingContainer(decoder: self)
     }
     
     func singleValueContainer() throws -> any SingleValueDecodingContainer {
@@ -197,6 +269,13 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         
         // UInt32 → Int safe conversion
         let length = Int(lengthUInt32)
+        
+        if let max = storage.limits.maximumDataByteCount, length > max {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath,
+                      debugDescription: "Data length \(length) exceeds maximum allowed \(max) bytes")
+            )
+        }
         
         storage.advanceOffset(lenSize)
         
@@ -336,6 +415,11 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
     }
     
     func readString() throws -> String {
+        try readString(utf8ByteCap: storage.limits.maximumStringUTF8ByteCount)
+    }
+    
+    /// - Parameter utf8ByteCap: When non-nil, rejects declared UTF-8 lengths greater than this (e.g. type header).
+    func readString(utf8ByteCap: Int?) throws -> String {
         let lenSize = 4
         let offset = storage.offset
         let d = storage.data
@@ -353,6 +437,13 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let b3 = UInt32(d[offset + 3]) << 24
         let lengthUInt32 = b0 | b1 | b2 | b3
         let length = Int(lengthUInt32)
+        
+        if let cap = utf8ByteCap, length > cap {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath,
+                      debugDescription: "String UTF-8 length \(length) exceeds maximum allowed \(cap) bytes")
+            )
+        }
         
         storage.advanceOffset(lenSize)
         
@@ -476,6 +567,13 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         // Read keyCount (UInt32)
         let countUInt32 = try decoder.readUInt32()
         let count = Int(countUInt32)
+        
+        if let max = decoder.storage.limits.maximumCollectionElementCount, count > max {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "Dictionary key count \(count) exceeds maximum allowed \(max)")
+            )
+        }
         
         var tmpEntries: [Entry] = []
         tmpEntries.reserveCapacity(count)
@@ -941,7 +1039,7 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         return try withValue(for: key) {
             storage.appendCodingPath(key)
             defer { storage.removeLastKey() }
-            return BinaryUnkeyedDecodingContainer(decoder: decoder)
+            return try BinaryUnkeyedDecodingContainer(decoder: decoder)
         }
     }
     
@@ -1096,37 +1194,34 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
         set { storage.setCodingPath(newValue) }
     }
     
-    private(set) var count: Int?
+    /// Wire element count; exposed as `Int?` for `UnkeyedDecodingContainer`.
+    private let elementCount: Int
+    
     private(set) var currentIndex: Int = 0
     
-    init(decoder: _BinaryDecoder) {
+    var count: Int? { elementCount }
+    
+    init(decoder: _BinaryDecoder) throws {
         self.decoder = decoder
         
-        // Read the count (UInt32) from the data
-        do {
-            let countUInt32 = try decoder.readUInt32()
-            self.count = Int(countUInt32)
-        } catch {
-            // If we can't read the count, set to nil
-            self.count = nil
+        let countUInt32 = try decoder.readUInt32()
+        let count = Int(countUInt32)
+        if let max = decoder.storage.limits.maximumCollectionElementCount, count > max {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "Array element count \(count) exceeds maximum allowed \(max)")
+            )
         }
+        self.elementCount = count
     }
     
     var isAtEnd: Bool {
-        guard let count = count else { return true }
-        return currentIndex >= count
+        currentIndex >= elementCount
     }
     
     // MARK: - Nil
     
     mutating func decodeNil() throws -> Bool {
-        guard count != nil else {
-            throw DecodingError.dataCorrupted(
-                .init(codingPath: codingPath,
-                      debugDescription: "Cannot decode array element: invalid array count")
-            )
-        }
-        
         guard !isAtEnd else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
@@ -1472,7 +1567,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
         storage.appendCodingPath(ArrayIndexKey(currentIndex))
         defer { storage.removeLastKey() }
         
-        let container = BinaryUnkeyedDecodingContainer(decoder: decoder)
+        let container = try BinaryUnkeyedDecodingContainer(decoder: decoder)
         currentIndex += 1
         return container
     }
@@ -1484,13 +1579,6 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
     // MARK: - Helper
     
     private func checkNotAtEnd() throws {
-        guard count != nil else {
-            throw DecodingError.dataCorrupted(
-                .init(codingPath: codingPath,
-                      debugDescription: "Cannot decode array element: invalid array count")
-            )
-        }
-        
         guard !isAtEnd else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
@@ -1665,7 +1753,7 @@ fileprivate func descriptor(for type: Any.Type) -> CanonicalTypeDescriptor {
     }
     
     let full = String(reflecting: underlying)
-    let core = canonicalCoreNameString(full)
+    let core = normalizeStdlibModuleQualifiersInCoreName(canonicalCoreNameString(full))
     let category: TypeCategory = isPrimitiveOrStdCoreName(core) ? .primitiveOrStd : .custom
     
     return CanonicalTypeDescriptor(coreName: core, isOptional: isOpt, category: category)
@@ -1693,14 +1781,50 @@ fileprivate func descriptor(fromEncodedName name: String) -> CanonicalTypeDescri
         innerRaw = name
     }
     
-    let core = canonicalCoreNameString(innerRaw)
+    let core = normalizeStdlibModuleQualifiersInCoreName(canonicalCoreNameString(innerRaw))
     let category: TypeCategory = isPrimitiveOrStdCoreName(core) ? .primitiveOrStd : .custom
     
     return CanonicalTypeDescriptor(coreName: core, isOptional: isOpt, category: category)
 }
 
+/// Modules whose type names are treated as stable re-exports for header matching: any
+/// `Module.TypeName` token in a **generic argument position** is reduced to `TypeName`.
+///
+/// Extend this list when Apple (or another upstream) splits types across modules the way
+/// `Foundation` / `FoundationEssentials` do for `UUID`, `Date`, etc. App-defined modules must
+/// **not** be listed here, or distinct types could incorrectly match (e.g. two different `Person`
+/// structs collapsing to the same descriptor).
+fileprivate let stdlibModuleQualifierNamesForWireMatching: [String] = [
+    "Swift",
+    "Foundation",
+    "FoundationEssentials",
+]
+
+/// Strips listed stdlib module qualifiers from type tokens in generic arguments (after `<` or `,`,
+/// before `<`, `,`, or `>`), iteratively so nested types normalize fully.
+fileprivate func normalizeStdlibModuleQualifiersInCoreName(_ coreName: String) -> String {
+    // Canonicalize generic whitespace first so
+    // "Dictionary<A, B>" and "Dictionary<A,B>" compare identically.
+    let compact = coreName.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+    
+    let alternation = stdlibModuleQualifierNamesForWireMatching.joined(separator: "|")
+    let pattern = "(?<=[<,])(?:" + alternation + ")\\.([A-Za-z_][A-Za-z0-9_]*)(?=[<,>])"
+    var current = compact
+    while true {
+        let next = current.replacingOccurrences(
+            of: pattern,
+            with: "$1",
+            options: .regularExpression
+        )
+        if next == current { break }
+        current = next
+    }
+    return current
+}
+
 /// Our compatibility rule:
 /// - `coreName` must match (so Set<String> vs Array<String> is always a mismatch)
+/// - Swift / Foundation / FoundationEssentials qualifiers in generic arguments are stripped when building descriptors
 /// - if both `.custom`, we ignore `isOptional`
 ///   -> Optional<AuthPacket> <-> AuthPacket OK
 ///   -> IRC.AuthPacket <-> Server.AuthPacket OK
