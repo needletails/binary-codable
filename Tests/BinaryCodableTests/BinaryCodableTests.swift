@@ -1046,6 +1046,23 @@ struct BinaryCodableTests {
         #expect(decoded.username == original.username)
         #expect(decoded.token == original.token)
     }
+    
+    @Test("Binary Decoder: [IRC.AuthPacket] decodes as [Server.AuthPacket] (same simple element name)")
+    func testCrossNamespaceAuthPacketArrayDecode() async throws {
+        let original = [
+            IRC.AuthPacket(username: "echo", token: "one"),
+            IRC.AuthPacket(username: "foxtrot", token: "two")
+        ]
+        
+        let encoded = try BinaryEncoder().encode(original)
+        let decoded = try BinaryDecoder().decode([Server.AuthPacket].self, from: encoded)
+        
+        #expect(decoded.count == original.count)
+        #expect(decoded[0].username == original[0].username)
+        #expect(decoded[0].token == original[0].token)
+        #expect(decoded[1].username == original[1].username)
+        #expect(decoded[1].token == original[1].token)
+    }
 
     @Test("Binary Decoder: Different simple names still typeMismatch")
     func testDifferentTypeNamesStillMismatch() async throws {
