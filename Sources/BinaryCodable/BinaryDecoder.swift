@@ -139,16 +139,15 @@ public struct BinaryDecoder: Sendable {
         let requestedDesc = descriptor(for: T.self)
         
         guard areCompatible(encodedDesc, requestedDesc) else {
-            // Compare normalized structural identity (see `normalizeModuleQualifiersInGenericArguments`),
-            // not raw `String(reflecting:)`, so module provenance in generic arguments does not cause
-            // spurious mismatches for custom model types that intentionally share simple names and layout.
+            // Compare normalized structural identity (see `normalizeWireMatchingCoreName`),
+            // not raw `String(reflecting:)`, so module provenance does not cause spurious failures.
             throw DecodingError.typeMismatch(
                 T.self,
                 .init(
                     codingPath: storage.codingPath,
                     debugDescription: "Type mismatch: normalized wire identity \"\(encodedDesc.coreName)\" " +
                         "does not match requested \"\(requestedDesc.coreName)\". " +
-                        "(Module qualifiers in generic arguments are ignored for this comparison.) " +
+                        "(Stdlib module aliases and custom simple names in generic arguments are normalized for this comparison.) " +
                         "Original encoded header: \(encodedTypeNameRaw)"
                 )
             )
@@ -1753,7 +1752,7 @@ fileprivate func descriptor(for type: Any.Type) -> CanonicalTypeDescriptor {
     }
     
     let full = String(reflecting: underlying)
-    let core = normalizeModuleQualifiersInGenericArguments(canonicalCoreNameString(full))
+    let core = normalizeWireMatchingCoreName(canonicalCoreNameString(full))
     let category: TypeCategory = isPrimitiveOrStdCoreName(core) ? .primitiveOrStd : .custom
     
     return CanonicalTypeDescriptor(coreName: core, isOptional: isOpt, category: category)
@@ -1781,30 +1780,22 @@ fileprivate func descriptor(fromEncodedName name: String) -> CanonicalTypeDescri
         innerRaw = name
     }
     
-    let core = normalizeModuleQualifiersInGenericArguments(canonicalCoreNameString(innerRaw))
+    let core = normalizeWireMatchingCoreName(canonicalCoreNameString(innerRaw))
     let category: TypeCategory = isPrimitiveOrStdCoreName(core) ? .primitiveOrStd : .custom
     
     return CanonicalTypeDescriptor(coreName: core, isOptional: isOpt, category: category)
 }
 
-/// Strips module qualifiers from type tokens in generic arguments (after `<` or `,`,
-/// before `<`, `,`, or `>`), iteratively so nested types normalize fully.
-///
-/// This mirrors the existing non-generic custom-type behavior (simple-name matching) and
-/// extends it into generic arguments so:
-/// - `Array<NudgeServer.UserDeviceConfiguration>` and
-///   `Array<SessionModels.UserDeviceConfiguration>` compare as `Array<UserDeviceConfiguration>`.
-/// - `Array<BinaryCodableTests.IRC.AuthPacket>` and
-///   `Array<BinaryCodableTests.Server.AuthPacket>` compare as `Array<AuthPacket>`.
-fileprivate func normalizeModuleQualifiersInGenericArguments(_ coreName: String) -> String {
-    // Canonicalize generic whitespace first so
-    // "Dictionary<A, B>" and "Dictionary<A,B>" compare identically.
-    let compact = coreName.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-    
-    // Match a full generic type token that contains one or more dots and keep only its final
-    // component, even when Swift reflection inserts contextual segments like "(unknown context at ...)".
-    let pattern = "(?<=[<,])[^<>,]*\\.([^.<>,]+)(?=[<,>])"
-    var current = compact
+/// Stdlib modules treated as stable re-exports when they appear in generic argument positions.
+/// Extend when Apple splits types across modules (Foundation vs FoundationEssentials).
+fileprivate let stdlibModuleQualifierNamesForWireMatching: [String] = [
+    "Swift",
+    "Foundation",
+    "FoundationEssentials",
+]
+
+fileprivate func iterativelyApplyRegexReplacement(_ input: String, pattern: String) -> String {
+    var current = input
     while true {
         let next = current.replacingOccurrences(
             of: pattern,
@@ -1817,12 +1808,53 @@ fileprivate func normalizeModuleQualifiersInGenericArguments(_ coreName: String)
     return current
 }
 
+/// Normalizes a structural core name for wire header comparison.
+///
+/// Three phases, in order:
+/// 1. **Stdlib aliases** — only `Swift` / `Foundation` / `FoundationEssentials` prefixes inside
+///    generic arguments are stripped (e.g. `FoundationEssentials.UUID` → `UUID`).
+/// 2. **Reflection noise** — remove Swift `(unknown context at $…)` segments from nested paths.
+/// 3. **Custom simple names** — remaining qualified custom tokens in generic arguments reduce to
+///    their final path component so client/server module splits still match
+///    (e.g. `Array<NudgeServer.UserDeviceConfiguration>` ↔ `Array<SessionModels.UserDeviceConfiguration>`).
+///
+/// Phase 3 mirrors existing non-generic custom-type matching (`IRC.AuthPacket` ↔ `Server.AuthPacket`).
+/// Distinct custom types that share a simple name in different modules can still match if layouts align;
+/// use distinct type names when that ambiguity is unacceptable.
+fileprivate func normalizeWireMatchingCoreName(_ coreName: String) -> String {
+    // Canonicalize generic whitespace first so
+    // "Dictionary<A, B>" and "Dictionary<A,B>" compare identically.
+    var current = coreName.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+
+    // Phase 1: stdlib re-export aliases in generic argument positions.
+    let stdlibAlternation = stdlibModuleQualifierNamesForWireMatching.joined(separator: "|")
+    let stdlibPattern = "(?<=[<,])(?:" + stdlibAlternation + ")\\.([A-Za-z_][A-Za-z0-9_]*)(?=[<,>])"
+    current = iterativelyApplyRegexReplacement(current, pattern: stdlibPattern)
+
+    // Phase 2: Swift reflection may insert contextual path segments in generic arguments.
+    current = current.replacingOccurrences(
+        of: "\\(unknown\\s*context\\s*at\\s*\\$[^)]+\\)",
+        with: "",
+        options: [.regularExpression, .caseInsensitive]
+    )
+    current = current.replacingOccurrences(of: "\\.+", with: ".", options: .regularExpression)
+    current = current.replacingOccurrences(of: "<\\.", with: "<", options: .regularExpression)
+    current = current.replacingOccurrences(of: ",\\.", with: ",", options: .regularExpression)
+
+    // Phase 3: custom model types — simple-name wire matching in generic arguments.
+    let customPattern = "(?<=[<,])[^<>,]*\\.([^.<>,()]+)(?=[<,>])"
+    current = iterativelyApplyRegexReplacement(current, pattern: customPattern)
+
+    return current
+}
+
 /// Our compatibility rule:
 /// - `coreName` must match (so Set<String> vs Array<String> is always a mismatch)
-/// - module qualifiers in generic arguments are stripped when building descriptors
+/// - stdlib aliases and custom simple names in generic arguments are normalized when building descriptors
 /// - if both `.custom`, we ignore `isOptional`
 ///   -> Optional<AuthPacket> <-> AuthPacket OK
 ///   -> IRC.AuthPacket <-> Server.AuthPacket OK
+///   -> [IRC.AuthPacket] <-> [Server.AuthPacket] OK
 /// - otherwise (primitives / std containers), `isOptional` must match
 ///   -> Int? -> Int is NOT OK
 fileprivate func areCompatible(_ encoded: CanonicalTypeDescriptor,

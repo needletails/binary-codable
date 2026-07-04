@@ -999,6 +999,85 @@ struct BinaryCodableTests {
             let username: String
             let password: String
         }
+
+        struct DeviceKeyBundle: Codable, Equatable {
+            let deviceId: UUID
+            let longTermPublicKey: Data
+        }
+    }
+
+    /// Mirrors SessionModels wire shapes used by the nudge client.
+    private enum SessionModels {
+        struct UserDeviceConfiguration: Codable, Equatable {
+            let deviceId: UUID
+            let deviceName: String
+            let isMasterDevice: Bool
+        }
+
+        struct UserConfiguration: Codable, Equatable {
+            let secretName: String
+            let signedDevices: [UserDeviceConfiguration]
+        }
+
+        struct Call: Codable, Equatable {
+            let id: UUID
+            let sharedCommunicationId: String
+        }
+
+        struct ReachableServers: Codable, Equatable {
+            let host: String
+            let port: Int
+            let isSecure: Bool
+        }
+
+        enum UserConfigurationNested {
+            struct SignedOneTimePublicKey: Codable, Equatable {
+                let key: Data
+                let deviceId: UUID
+            }
+        }
+    }
+
+    /// Mirrors NudgeServer / NudgeRestAPI wire shapes.
+    private enum NudgeServer {
+        struct UserDeviceConfiguration: Codable, Equatable {
+            let deviceId: UUID
+            let deviceName: String
+            let isMasterDevice: Bool
+        }
+
+        struct UserConfiguration: Codable, Equatable {
+            let secretName: String
+            let signedDevices: [UserDeviceConfiguration]
+        }
+
+        struct ReachableServers: Codable, Equatable {
+            let host: String
+            let port: Int
+            let isSecure: Bool
+        }
+
+        enum UserConfigurationNested {
+            struct SignedPublicOneTimeKey: Codable, Equatable {
+                let key: Data
+                let deviceId: UUID
+            }
+        }
+    }
+
+    /// Mirrors PQSRTC client call payloads decoded by SwiftSFU.
+    private enum PQSRTC {
+        struct Call: Codable, Equatable {
+            let id: UUID
+            let sharedCommunicationId: String
+        }
+    }
+
+    private enum SwiftSFU {
+        struct Call: Codable, Equatable {
+            let id: UUID
+            let sharedCommunicationId: String
+        }
     }
 
     // MARK: - Tests
@@ -1062,6 +1141,137 @@ struct BinaryCodableTests {
         #expect(decoded[0].token == original[0].token)
         #expect(decoded[1].username == original[1].username)
         #expect(decoded[1].token == original[1].token)
+    }
+
+    @Test("Binary Decoder: cross-namespace array accepts wire header with unknown context segment")
+    func testCrossNamespaceAuthPacketArrayDecode_unknownContextWireHeader() async throws {
+        let original = [IRC.AuthPacket(username: "echo", token: "one")]
+        let encoded = try BinaryEncoder().encode(original)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Array<BinaryCodableTests.IRC.(unknown context at $deadbeef).AuthPacket>"
+        )
+        let decoded = try BinaryDecoder().decode([Server.AuthPacket].self, from: forged)
+        #expect(decoded.count == 1)
+        #expect(decoded[0].username == original[0].username)
+        #expect(decoded[0].token == original[0].token)
+    }
+
+    // MARK: - Cross-module production wire header tests
+
+    @Test("Binary Decoder: NudgeServer [UserDeviceConfiguration] header decodes as SessionModels array")
+    func testCrossModule_userDeviceConfigurationArray() async throws {
+        let deviceId = UUID()
+        let original = [
+            SessionModels.UserDeviceConfiguration(
+                deviceId: deviceId,
+                deviceName: "linked-phone",
+                isMasterDevice: false
+            )
+        ]
+        let encoded = try BinaryEncoder().encode(original)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Array<NudgeServer.UserDeviceConfiguration>"
+        )
+        let decoded = try BinaryDecoder().decode(
+            [NudgeServer.UserDeviceConfiguration].self,
+            from: forged
+        )
+        #expect(decoded == original.map {
+            NudgeServer.UserDeviceConfiguration(
+                deviceId: $0.deviceId,
+                deviceName: $0.deviceName,
+                isMasterDevice: $0.isMasterDevice
+            )
+        })
+    }
+
+    @Test("Binary Decoder: NudgeServer UserConfiguration header decodes as SessionModels scalar")
+    func testCrossModule_userConfigurationScalar() async throws {
+        let deviceId = UUID()
+        let original = SessionModels.UserConfiguration(
+            secretName: "alice",
+            signedDevices: [
+                SessionModels.UserDeviceConfiguration(
+                    deviceId: deviceId,
+                    deviceName: "master-mac",
+                    isMasterDevice: true
+                )
+            ]
+        )
+        let encoded = try BinaryEncoder().encode(original)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "NudgeRestAPI.UserConfiguration"
+        )
+        let decoded = try BinaryDecoder().decode(NudgeServer.UserConfiguration.self, from: forged)
+        #expect(decoded.secretName == original.secretName)
+        #expect(decoded.signedDevices.count == 1)
+        #expect(decoded.signedDevices[0].deviceId == deviceId)
+        #expect(decoded.signedDevices[0].deviceName == "master-mac")
+    }
+
+    @Test("Binary Decoder: PQSRTC Call header decodes as SwiftSFU Call")
+    func testCrossModule_callScalar() async throws {
+        let callId = UUID()
+        let original = PQSRTC.Call(id: callId, sharedCommunicationId: "room-42")
+        let encoded = try BinaryEncoder().encode(original)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "PQSRTC.Call"
+        )
+        let decoded = try BinaryDecoder().decode(SwiftSFU.Call.self, from: forged)
+        #expect(decoded.id == callId)
+        #expect(decoded.sharedCommunicationId == "room-42")
+    }
+
+    @Test("Binary Decoder: load-balancer [ReachableServers] header decodes on client module")
+    func testCrossModule_reachableServersArray() async throws {
+        let original = [
+            SessionModels.ReachableServers(host: "irc.example.com", port: 6697, isSecure: true)
+        ]
+        let encoded = try BinaryEncoder().encode(original)
+        let forged = binaryReplacingWireTypeName(
+            encoded,
+            newTypeName: "Swift.Array<NudgeServer.LoadBalanceClient.ReachableServers>"
+        )
+        let decoded = try BinaryDecoder().decode([NudgeServer.ReachableServers].self, from: forged)
+        #expect(decoded.count == 1)
+        #expect(decoded[0].host == "irc.example.com")
+        #expect(decoded[0].port == 6697)
+        #expect(decoded[0].isSecure == true)
+    }
+
+    @Test("Binary Decoder: different OTK simple names still typeMismatch across modules")
+    func testCrossModule_differentOneTimeKeyNamesStillMismatch() async throws {
+        let deviceId = UUID()
+        let original = [
+            SessionModels.UserConfigurationNested.SignedOneTimePublicKey(
+                key: Data([1, 2, 3]),
+                deviceId: deviceId
+            )
+        ]
+        let encoded = try BinaryEncoder().encode(original)
+        #expect(throws: Error.self) {
+            _ = try BinaryDecoder().decode(
+                [NudgeServer.UserConfigurationNested.SignedPublicOneTimeKey].self,
+                from: encoded
+            )
+        }
+    }
+
+    @Test("Binary Decoder: different custom simple names still typeMismatch across modules")
+    func testCrossModule_userDeviceConfigurationVsDeviceKeyBundleMismatch() async throws {
+        let original = SessionModels.UserDeviceConfiguration(
+            deviceId: UUID(),
+            deviceName: "phone",
+            isMasterDevice: false
+        )
+        let encoded = try BinaryEncoder().encode(original)
+        #expect(throws: Error.self) {
+            _ = try BinaryDecoder().decode(Server.DeviceKeyBundle.self, from: encoded)
+        }
     }
 
     @Test("Binary Decoder: Different simple names still typeMismatch")
