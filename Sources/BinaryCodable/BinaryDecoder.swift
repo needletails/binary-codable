@@ -1845,6 +1845,11 @@ fileprivate func normalizeWireMatchingCoreName(_ coreName: String) -> String {
     let customPattern = "(?<=[<,])[^<>,]*\\.([^.<>,()]+)(?=[<,>])"
     current = iterativelyApplyRegexReplacement(current, pattern: customPattern)
 
+    // Phase 4: DRK 4.0 renamed Curve* → X25519* but published OTK blobs still
+    // carry the 3.x type header. Treat them as the same wire identity.
+    current = current.replacingOccurrences(of: "CurvePrivateKey", with: "X25519PrivateKey")
+    current = current.replacingOccurrences(of: "CurvePublicKey", with: "X25519PublicKey")
+
     return current
 }
 

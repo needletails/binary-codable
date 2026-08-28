@@ -396,6 +396,42 @@ struct BinaryCodableTests {
         #expect(decoded == dates)
     }
     
+    @Test("Binary Decoder accepts 3.x CurvePublicKey header as X25519PublicKey")
+    func testBinaryDecoder_curvePublicKeyHeaderAliasesX25519PublicKey() async throws {
+        struct CurvePublicKey: Codable, Equatable {
+            let id: UUID
+            let rawRepresentation: Data
+        }
+        struct X25519PublicKey: Codable, Equatable {
+            let id: UUID
+            let rawRepresentation: Data
+        }
+
+        let curveKey = CurvePublicKey(id: UUID(), rawRepresentation: Data(repeating: 7, count: 32))
+        let encoded = try BinaryEncoder().encode(curveKey)
+        let decoded = try BinaryDecoder().decode(X25519PublicKey.self, from: encoded)
+        #expect(decoded.id == curveKey.id)
+        #expect(decoded.rawRepresentation == curveKey.rawRepresentation)
+    }
+
+    @Test("Binary Decoder accepts 3.x CurvePrivateKey header as X25519PrivateKey")
+    func testBinaryDecoder_curvePrivateKeyHeaderAliasesX25519PrivateKey() async throws {
+        struct CurvePrivateKey: Codable, Equatable {
+            let id: UUID
+            let rawRepresentation: Data
+        }
+        struct X25519PrivateKey: Codable, Equatable {
+            let id: UUID
+            let rawRepresentation: Data
+        }
+
+        let curveKey = CurvePrivateKey(id: UUID(), rawRepresentation: Data(repeating: 9, count: 32))
+        let encoded = try BinaryEncoder().encode(curveKey)
+        let decoded = try BinaryDecoder().decode(X25519PrivateKey.self, from: encoded)
+        #expect(decoded.id == curveKey.id)
+        #expect(decoded.rawRepresentation == curveKey.rawRepresentation)
+    }
+
     @Test("Type mismatch error mentions normalized wire identity")
     func testBinaryDecoder_typeMismatchMessageUsesNormalizedIdentity() async throws {
         let encoded = try BinaryEncoder().encode(42)
