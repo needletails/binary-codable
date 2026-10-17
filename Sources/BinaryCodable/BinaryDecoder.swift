@@ -573,9 +573,19 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
                       debugDescription: "Dictionary key count \(count) exceeds maximum allowed \(max)")
             )
         }
-        
+        // Every entry occupies at least one byte, so a count larger than the bytes
+        // left is corrupt. Checked before any allocation: the count is attacker-
+        // supplied and `reserveCapacity` would otherwise honor it.
+        let remainingBytes = decoder.storage.data.count - decoder.storage.offset
+        guard count <= remainingBytes else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "Dictionary key count \(count) exceeds remaining input (\(remainingBytes) bytes)")
+            )
+        }
+
         var tmpEntries: [Entry] = []
-        tmpEntries.reserveCapacity(count)
+        tmpEntries.reserveCapacity(min(count, 1_024))
         
         for _ in 0..<count {
             // 1) key name (String)
@@ -1209,6 +1219,13 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath,
                       debugDescription: "Array element count \(count) exceeds maximum allowed \(max)")
+            )
+        }
+        let remainingBytes = decoder.storage.data.count - decoder.storage.offset
+        guard count <= remainingBytes else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "Array element count \(count) exceeds remaining input (\(remainingBytes) bytes)")
             )
         }
         self.elementCount = count
