@@ -2041,4 +2041,30 @@ struct BinaryCodableTests {
         #expect(decoded == 42)
     }
 
+    @Test("Binary Decoder: cached type descriptors keep header matching exact")
+    func testBinaryDecoder_descriptorCacheKeepsHeaderMatchingExact() async throws {
+        // Same header decoded repeatedly must keep working (second call is served from the cache).
+        let uuids = [UUID(), UUID()]
+        let encoded = try BinaryEncoder().encode(uuids)
+        let aliased = binaryReplacingWireTypeName(encoded, newTypeName: "Swift.Array<FoundationEssentials.UUID>")
+        for _ in 0..<3 {
+            #expect(try BinaryDecoder().decode([UUID].self, from: aliased) == uuids)
+        }
+        // A cached requested-type descriptor must not make a different header pass.
+        let mismatched = binaryReplacingWireTypeName(encoded, newTypeName: "Swift.Array<Swift.String>")
+        #expect(throws: DecodingError.self) {
+            _ = try BinaryDecoder().decode([UUID].self, from: mismatched)
+        }
+        // A cached header descriptor must not make a different requested type pass.
+        #expect(throws: DecodingError.self) {
+            _ = try BinaryDecoder().decode([String].self, from: aliased)
+        }
+        // Headers too long to cache still decode on every call.
+        let padding = String(repeating: "A", count: 2048)
+        let longHeader = binaryReplacingWireTypeName(encoded, newTypeName: "Swift.Array<\(padding).UUID>")
+        for _ in 0..<2 {
+            #expect(try BinaryDecoder().decode([UUID].self, from: longHeader) == uuids)
+        }
+    }
+
 }

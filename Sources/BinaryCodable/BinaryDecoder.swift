@@ -1752,11 +1752,66 @@ fileprivate func isPrimitiveOrStdCoreName(_ coreName: String) -> Bool {
     return false
 }
 
+/// Process-wide memo for `descriptor(for:)` / `descriptor(fromEncodedName:)`.
+///
+/// Building a descriptor runs `String(reflecting:)` plus the regex passes in
+/// `normalizeWireMatchingCoreName`, and the result for a given type or header
+/// string never changes, so every `decode` call after the first for that type
+/// should not pay for it again. Encoded names come from the wire, so that side
+/// is bounded in entry count and per-entry length to keep untrusted input from
+/// growing the cache without limit.
+fileprivate final class CanonicalTypeDescriptorCache: @unchecked Sendable {
+    static let shared = CanonicalTypeDescriptorCache()
+    
+    private let lock = NSLock()
+    private var byType: [ObjectIdentifier: CanonicalTypeDescriptor] = [:]
+    private var byEncodedName: [String: CanonicalTypeDescriptor] = [:]
+    private static let maxEncodedNameEntries = 1024
+    private static let maxCachedEncodedNameUTF8ByteCount = 1024
+    
+    func descriptor(for type: Any.Type, compute: () -> CanonicalTypeDescriptor) -> CanonicalTypeDescriptor {
+        let key = ObjectIdentifier(type)
+        lock.lock()
+        if let cached = byType[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        let computed = compute()
+        lock.lock()
+        byType[key] = computed
+        lock.unlock()
+        return computed
+    }
+    
+    func descriptor(fromEncodedName name: String, compute: () -> CanonicalTypeDescriptor) -> CanonicalTypeDescriptor {
+        lock.lock()
+        if let cached = byEncodedName[name] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        let computed = compute()
+        guard name.utf8.count <= Self.maxCachedEncodedNameUTF8ByteCount else { return computed }
+        lock.lock()
+        if byEncodedName.count >= Self.maxEncodedNameEntries {
+            byEncodedName.removeAll(keepingCapacity: true)
+        }
+        byEncodedName[name] = computed
+        lock.unlock()
+        return computed
+    }
+}
+
 /// Canonical descriptor for a Swift type `T`
 /// - Strips Optional (but records it as `isOptional`)
 /// - Reduces fully qualified name to a "core" name (module-agnostic)
 /// - Categorizes as primitive/std vs custom
 fileprivate func descriptor(for type: Any.Type) -> CanonicalTypeDescriptor {
+    CanonicalTypeDescriptorCache.shared.descriptor(for: type) { computeDescriptor(for: type) }
+}
+
+fileprivate func computeDescriptor(for type: Any.Type) -> CanonicalTypeDescriptor {
     let isOpt: Bool
     let underlying: Any.Type
     
@@ -1779,6 +1834,10 @@ fileprivate func descriptor(for type: Any.Type) -> CanonicalTypeDescriptor {
 /// Handles Optional wrappers and reduces inner type string to the same
 /// core-name format as `descriptor(for:)`.
 fileprivate func descriptor(fromEncodedName name: String) -> CanonicalTypeDescriptor {
+    CanonicalTypeDescriptorCache.shared.descriptor(fromEncodedName: name) { computeDescriptor(fromEncodedName: name) }
+}
+
+fileprivate func computeDescriptor(fromEncodedName name: String) -> CanonicalTypeDescriptor {
     let swiftOptPrefix = "Swift.Optional<"
     let plainOptPrefix = "Optional<"
     let optSuffix      = ">"
