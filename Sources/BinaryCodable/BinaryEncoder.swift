@@ -64,6 +64,12 @@ public struct BinaryEncoder: Sendable {
         storage.write(type)
         
         // 4) Payload – unchanged logic
+        // Data keeps its length-prefixed form, as in `encode(_: Data)`, even when the
+        // caller reaches this overload through a generic type.
+        if T.self == Data.self, let data = value as? Data {
+            storage.write(data)
+            return storage.data
+        }
         let core = _BinaryEncoder(storage: storage)
         try value.encode(to: core)
         
