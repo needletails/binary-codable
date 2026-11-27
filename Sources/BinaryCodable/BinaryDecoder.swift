@@ -181,12 +181,16 @@ public struct BinaryDecoder: Sendable {
 fileprivate final class DecoderStorage: @unchecked Sendable {
     private(set) var data: Data
     private(set) var offset: Int
+    /// Reads may not pass this offset. It is the end of the input, narrowed to the end
+    /// of a keyed value while that value is being decoded.
+    private(set) var end: Int
     private(set) var codingPath: [CodingKey]
     let version: UInt8  // Track version for backward compatibility
     let limits: BinaryDecodingLimits
     
     init(data: Data, offset: Int = 0, codingPath: [CodingKey] = [], version: UInt8 = 2, limits: BinaryDecodingLimits) {
         self.data = data
+        self.end = data.count
         self.offset = offset
         self.codingPath = codingPath
         self.version = version
@@ -199,6 +203,10 @@ fileprivate final class DecoderStorage: @unchecked Sendable {
     
     func setOffset(_ offset: Int) {
         self.offset = offset
+    }
+
+    func setEnd(_ end: Int) {
+        self.end = end
     }
     
     func setCodingPath(_ codingPath: [CodingKey]) {
@@ -215,6 +223,7 @@ fileprivate final class DecoderStorage: @unchecked Sendable {
     
     func setData(_ data: Data) {
         self.data = data
+        self.end = data.count
     }
 }
 
@@ -253,7 +262,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + lenSize <= d.count else {
+        guard offset + lenSize <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Data length")
@@ -278,7 +287,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         
         storage.advanceOffset(lenSize)
         
-        guard storage.offset + length <= d.count else {
+        guard storage.offset + length <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Data bytes")
@@ -295,7 +304,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + size <= d.count else {
+        guard offset + size <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading UUID")
@@ -317,7 +326,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset < d.count else {
+        guard offset < storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Bool")
@@ -334,7 +343,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + size <= d.count else {
+        guard offset + size <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Int64")
@@ -355,7 +364,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + size <= d.count else {
+        guard offset + size <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading UInt64")
@@ -376,7 +385,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + size <= d.count else {
+        guard offset + size <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Double")
@@ -397,7 +406,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + size <= d.count else {
+        guard offset + size <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading Float")
@@ -423,7 +432,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + lenSize <= d.count else {
+        guard offset + lenSize <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading String length")
@@ -446,7 +455,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         
         storage.advanceOffset(lenSize)
         
-        guard storage.offset + length <= d.count else {
+        guard storage.offset + length <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading String bytes")
@@ -471,7 +480,7 @@ fileprivate struct _BinaryDecoder: Decoder, @unchecked Sendable {
         let offset = storage.offset
         let d = storage.data
         
-        guard offset + size <= d.count else {
+        guard offset + size <= storage.end else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: codingPath,
                       debugDescription: "Unexpected end of data while reading UInt32")
@@ -549,6 +558,10 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     }
     
     private let entries: [Entry]
+    /// `stringValue` of each key → its position in `entries`.
+    private let entryIndex: [String: Int]
+    /// The bound this container was created under; none of its values may read past it.
+    private let containerEnd: Int
     
     var codingPath: [CodingKey] {
         get { storage.codingPath }
@@ -563,6 +576,8 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
     init(decoder: _BinaryDecoder) throws {
         self.decoder = decoder
         
+        self.containerEnd = decoder.storage.end
+
         // Read keyCount (UInt32)
         let countUInt32 = try decoder.readUInt32()
         let count = Int(countUInt32)
@@ -576,7 +591,7 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         // Every entry occupies at least one byte, so a count larger than the bytes
         // left is corrupt. Checked before any allocation: the count is attacker-
         // supplied and `reserveCapacity` would otherwise honor it.
-        let remainingBytes = decoder.storage.data.count - decoder.storage.offset
+        let remainingBytes = decoder.storage.end - decoder.storage.offset
         guard count <= remainingBytes else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath,
@@ -586,6 +601,8 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
 
         var tmpEntries: [Entry] = []
         tmpEntries.reserveCapacity(min(count, 1_024))
+        var tmpIndex: [String: Int] = [:]
+        tmpIndex.reserveCapacity(min(count, 1_024))
         
         for _ in 0..<count {
             // 1) key name (String)
@@ -602,7 +619,9 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
             decoder.storage.advanceOffset(valueLength)
             
             // Convert to CodingKey if possible; unknown keys are ignored (like JSONDecoder).
-            if let codingKey = Key(stringValue: keyName) {
+            // A repeated key keeps its first value and is listed once.
+            if let codingKey = Key(stringValue: keyName), tmpIndex[codingKey.stringValue] == nil {
+                tmpIndex[codingKey.stringValue] = tmpEntries.count
                 tmpEntries.append(Entry(key: codingKey,
                                         valueOffset: valueOffset,
                                         valueLength: valueLength))
@@ -610,12 +629,13 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         }
         
         self.entries = tmpEntries
+        self.entryIndex = tmpIndex
     }
     
     // MARK: - Helpers
     
     private func entry(for key: Key) -> Entry? {
-        entries.first { $0.key.stringValue == key.stringValue }
+        entryIndex[key.stringValue].map { entries[$0] }
     }
     
     private func withValue<T>(for key: Key, _ body: () throws -> T) throws -> T {
@@ -628,8 +648,14 @@ fileprivate struct BinaryKeyedDecodingContainer<Key: CodingKey>: KeyedDecodingCo
         }
         
         let savedOffset = storage.offset
+        let savedEnd = storage.end
         storage.setOffset(entry.valueOffset)
-        defer { storage.setOffset(savedOffset) }
+        // The value owns only its declared bytes, inside this container's own bound.
+        storage.setEnd(min(containerEnd, entry.valueOffset + entry.valueLength))
+        defer {
+            storage.setOffset(savedOffset)
+            storage.setEnd(savedEnd)
+        }
         
         return try body()
     }
@@ -1080,7 +1106,7 @@ fileprivate struct BinarySingleValueDecodingContainer: SingleValueDecodingContai
     func decodeNil() -> Bool {
         // Single-value container doesn’t have presence flags in this format.
         // If something is "nil", the outer layer shouldn’t have encoded it as a single value.
-        return storage.offset == storage.data.count
+        return storage.offset == storage.end
     }
     
     // MARK: - Concrete primitives – must mirror encoder
@@ -1221,7 +1247,7 @@ fileprivate struct BinaryUnkeyedDecodingContainer: UnkeyedDecodingContainer, Sen
                       debugDescription: "Array element count \(count) exceeds maximum allowed \(max)")
             )
         }
-        let remainingBytes = decoder.storage.data.count - decoder.storage.offset
+        let remainingBytes = decoder.storage.end - decoder.storage.offset
         guard count <= remainingBytes else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath,
@@ -1909,7 +1935,7 @@ fileprivate func normalizeWireMatchingCoreName(_ coreName: String) -> String {
 
     // Phase 2: Swift reflection may insert contextual path segments in generic arguments.
     current = current.replacingOccurrences(
-        of: "\\(unknown\\s*context\\s*at\\s*\\$[^)]+\\)",
+        of: "\\(unknown\\s*context\\s*at\\s*\\$[^()]+\\)",
         with: "",
         options: [.regularExpression, .caseInsensitive]
     )
