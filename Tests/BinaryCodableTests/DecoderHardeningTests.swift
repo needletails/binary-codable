@@ -228,6 +228,38 @@ struct DecoderHardeningTests {
         }
     }
 
+    @Test("A mismatched type header is capped and escaped in the error")
+    func mismatchedHeaderIsCappedAndEscapedInError() {
+        func mismatchText(header: String) -> String {
+            do {
+                _ = try BinaryDecoder().decode(DHOne.self, from: frame(header: header, payload: []))
+                return ""
+            } catch DecodingError.typeMismatch(let type, let context) {
+                return "\(DecodingError.typeMismatch(type, context))"
+            } catch {
+                return ""
+            }
+        }
+
+        // A header that tries to start a new log line and send terminal codes.
+        let hostile = "Z\n2026-11-27T00:00:00Z critical [ Server ] FORGED" + "\u{1B}[2J" + "\u{9B}"
+            + String(repeating: "A", count: 40_000)
+        let text = mismatchText(header: hostile)
+        #expect(text.contains("FORGED"))
+        #expect(!text.unicodeScalars.contains { $0.value < 0x20 || (0x7F...0x9F).contains($0.value) })
+        #expect(text.utf8.count < 2_048, "error text is \(text.utf8.count) bytes")
+
+        // One character made of many scalars must not get around the cap.
+        let stacked = "e" + String(repeating: "\u{301}", count: 40_000)
+        #expect(mismatchText(header: stacked).utf8.count < 8_192)
+
+        // Control: an ordinary mismatch reads as before and names both types.
+        let ordinary = mismatchText(header: "Other.Module.Thing")
+        #expect(ordinary.contains("normalized wire identity \"Thing\""))
+        #expect(ordinary.contains("Original encoded header: Other.Module.Thing"))
+        #expect(ordinary.contains("DHOne"))
+    }
+
     // MARK: Keyed lookup
 
     @Test("Dictionary decoding does not scan every entry per key")

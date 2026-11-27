@@ -145,10 +145,10 @@ public struct BinaryDecoder: Sendable {
                 T.self,
                 .init(
                     codingPath: storage.codingPath,
-                    debugDescription: "Type mismatch: normalized wire identity \"\(encodedDesc.coreName)\" " +
+                    debugDescription: "Type mismatch: normalized wire identity \"\(describeWireText(encodedDesc.coreName))\" " +
                         "does not match requested \"\(requestedDesc.coreName)\". " +
                         "(Stdlib module aliases and custom simple names in generic arguments are normalized for this comparison.) " +
-                        "Original encoded header: \(encodedTypeNameRaw)"
+                        "Original encoded header: \(describeWireText(encodedTypeNameRaw))"
                 )
             )
         }
@@ -174,6 +174,16 @@ public struct BinaryDecoder: Sendable {
         
         return value
     }
+}
+
+/// Text that came off the wire, made safe to put in an error message: capped, and with
+/// everything except printable ASCII escaped, so it cannot start a new log line or send
+/// terminal control codes. Capped by scalar, because one character can hold any number.
+fileprivate func describeWireText(_ text: String) -> String {
+    let limit = 256
+    let scalars = text.unicodeScalars
+    let shown = scalars.prefix(limit).map { $0.escaped(asASCII: true) }.joined()
+    return scalars.count > limit ? shown + "..." : shown
 }
 
 // MARK: - Shared state (storage)
